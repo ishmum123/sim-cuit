@@ -253,6 +253,7 @@ export class Simulation {
     const internalNodeMap = this._internalNodeMap;
     return {
       dt,
+      time: this.time,
       vNode: (i) => (i === 0 ? 0 : nodeVoltages[i] || 0),
       branchCurrent: (compId, k = 0) => {
         const arr = branchMap.get(compId);

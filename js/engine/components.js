@@ -106,8 +106,32 @@ export function terminalOffsets(comp) {
       rotOffset(0, 30, rot),  // wiper
     ];
   }
-  // default 2-terminal parts (battery, resistor, led, diode, capacitor, motor,
-  // bulb, fuse, switch, voltmeter, ammeter)
+  if (type === 'npn' || type === 'pnp') {
+    return [
+      rotOffset(40, -20, rot), // collector
+      rotOffset(-40, 0, rot),  // base
+      rotOffset(40, 20, rot),  // emitter
+    ];
+  }
+  if (type === 'nmos' || type === 'pmos') {
+    return [
+      rotOffset(40, -20, rot), // drain
+      rotOffset(-40, 0, rot),  // gate
+      rotOffset(40, 20, rot),  // source
+    ];
+  }
+  if (type === 'esp32') {
+    return [
+      rotOffset(-60, -60, rot), // VIN
+      rotOffset(-60, 0, rot),   // GND
+      rotOffset(-60, 60, rot),  // 3V3
+      rotOffset(60, -60, rot),  // GPIO2
+      rotOffset(60, 0, rot),    // GPIO4
+      rotOffset(60, 60, rot),   // GPIO5
+    ];
+  }
+  // default 2-terminal parts (battery, resistor, led, diode, zener, capacitor,
+  // motor, bulb, fuse, switch, voltmeter, ammeter)
   return [rotOffset(-40, 0, rot), rotOffset(40, 0, rot)];
 }
 
@@ -138,10 +162,242 @@ export function repair(comp) {
   s.rpm = 0;
   s.spinning = false;
   s.brightness = 0;
+  // esp32-specific (harmless no-op for other types)
+  s.pinFailed = null;
+  s.brownout = false;
+  s.status = null;
+  s.gpio = null;
+  s.pinCurrent = null;
   if (comp.type === 'switch') {
     // leave user-set closed state alone
   }
   return comp;
+}
+
+// ---------------------------------------------------------------------------
+// BJT (npn/pnp) — simplified Ebers-Moll, shared by both polarities
+// ---------------------------------------------------------------------------
+
+function makeBjt(polarity, label, prefix, params) {
+  return {
+    label, prefix, terminals: 3,
+    defaultParams: { beta: 150, isE: 6e-15, isC: 6e-14, n: 1, ...params },
+    defaultRatings: { maxCurrent: 0.2, maxPower: 0.625, maxVceo: 40 },
+    paramSchema: [
+      { key: 'beta', label: 'Current Gain (β)', type: 'number', min: 1 },
+      { key: 'isE', label: 'BE Saturation Current (A)', type: 'number', min: 1e-18 },
+      { key: 'n', label: 'Ideality Factor', type: 'number', min: 1 },
+    ],
+    stamp(comp, ctx) {
+      const [c, b, e] = comp.nodes;
+      const s = comp.state;
+      if (s.failed === 'short') { stampResistor(ctx, c, e, 1 / FAIL_SHORT_G); return; }
+      const isE = comp.params.isE, isC = comp.params.isC;
+      const nVt = (comp.params.n || 1) * 0.02585;
+      const beta = comp.params.beta;
+      // beP/beN and bcP/bcN swap by polarity so the same diode math produces
+      // the "forward-sense" junction voltage/current for either npn or pnp.
+      const beP = polarity > 0 ? b : e, beN = polarity > 0 ? e : b;
+      const bcP = polarity > 0 ? b : c, bcN = polarity > 0 ? c : b;
+      const Vbe = ctx.vNode(beP) - ctx.vNode(beN);
+      const { g: gBe, K: KBe } = diodeCompanion(s, 'be', isE, nVt, Vbe);
+      stampCompanion(ctx, beP, beN, gBe, KBe);
+      const Vbc = ctx.vNode(bcP) - ctx.vNode(bcN);
+      const { g: gBc, K: KBc } = diodeCompanion(s, 'bc', isC, nVt, Vbc);
+      stampCompanion(ctx, bcP, bcN, gBc, KBc);
+      // controlled collector current: beta * Ibe, recomputed fresh each Newton
+      // iteration from the linearized BE companion (same "fixed point per
+      // iteration" idiom the motor uses for its back-EMF term). Also
+      // linearized w.r.t. its OWN terminal voltage (Early-effect-like output
+      // conductance) exactly like a companion diode, so the C-E branch has a
+      // real Jacobian entry instead of a bare floating current source —
+      // without this, Newton has nothing damping the C-E loop and diverges.
+      const ibeNow = gBe * (ctx.vNode(beP) - ctx.vNode(beN)) + KBe;
+      const ibcNow = gBc * (ctx.vNode(bcP) - ctx.vNode(bcN)) + KBc;
+      const icForward = Math.max(beta * ibeNow, 0);
+      const ceP = polarity > 0 ? c : e, ceN = polarity > 0 ? e : c;
+      const vceFwdNow = ctx.vNode(ceP) - ctx.vNode(ceN);
+      const gce = Math.max(icForward, 1e-9) / 100; // Early voltage ~100V
+      const Kce = icForward - gce * vceFwdNow;
+      stampCompanion(ctx, ceP, ceN, gce, Kce);
+      // Stash the companion-linearized junction currents (NOT recomputed raw
+      // from final node voltages in computeState) — with a base resistor
+      // dominating the loop the diode's own conductance can stay far below
+      // the outer Newton tolerance's sensitivity, so the matrix can settle
+      // while Vbe is still mid-pnjlim-ladder; evaluating a bare exponential
+      // at that raw, not-fully-walked-down voltage overflows. Reusing the
+      // exact linear values the matrix was actually solved with keeps the
+      // reported current self-consistent with what was stamped.
+      s._ibeLast = ibeNow;
+      s._ibcLast = ibcNow;
+    },
+    computeState(comp, ctx) {
+      const [c, b, e] = comp.nodes;
+      const s = comp.state;
+      const vceRaw = ctx.vNode(c) - ctx.vNode(e);
+      const vbeRaw = ctx.vNode(b) - ctx.vNode(e);
+      if (s.failed === 'short') {
+        s.v = vceRaw; s.vbe = vbeRaw; s.ib = 0;
+        s.i = vceRaw / (1 / FAIL_SHORT_G);
+        s.p = Math.abs(s.v * s.i);
+        return;
+      }
+      const beta = comp.params.beta;
+      const ibeJ = s._ibeLast || 0;
+      const ibcJ = s._ibcLast || 0;
+      const icJ = beta * ibeJ - ibcJ;
+      const ibJ = ibeJ + ibcJ;
+      s.v = vceRaw;
+      s.vbe = vbeRaw;
+      s.i = polarity * icJ;
+      s.ib = polarity * ibJ;
+      s.p = Math.abs(vceRaw * s.i) + Math.abs(vbeRaw * s.ib);
+    },
+    postStep(comp, dt) {
+      const s = comp.state;
+      clearJustFailed(s);
+      if (s.failed) return;
+      const maxI = comp.ratings.maxCurrent;
+      const maxP = comp.ratings.maxPower;
+      const maxV = comp.ratings.maxVceo;
+      if (Math.abs(s.v) > maxV) {
+        markFailed(s, 'short', `${comp.id} breakdown: |Vce| ${Math.abs(s.v).toFixed(1)}V exceeded ${maxV}V Vceo rating`);
+        return;
+      }
+      const ratio = Math.max(Math.abs(s.i) / maxI, Math.abs(s.p) / maxP);
+      if (ratio > 1) {
+        s.temp = (s.temp || 0) + dt * (ratio - 1) / 0.8;
+      } else {
+        s.temp = Math.max((s.temp || 0) - dt * 0.25, 0);
+      }
+      if (s.temp >= 1) {
+        markFailed(s, 'short', `${comp.id} burned out: ${(Math.abs(s.p) * 1000).toFixed(0)} mW > ${(maxP * 1000).toFixed(0)} mW max`);
+      }
+    },
+    spice(comp, nn) {
+      const model = polarity > 0 ? 'NPN' : 'PNP';
+      return `Q${comp.id} ${nn[0]} ${nn[1]} ${nn[2]} QMOD_${comp.id}\n.MODEL QMOD_${comp.id} ${model}(IS=${comp.params.isE} BF=${comp.params.beta})`;
+    },
+    kicad: {
+      lib: 'Transistor_BJT',
+      symbol: polarity > 0 ? 'Q_NPN_CBE' : 'Q_PNP_CBE',
+      footprint: 'Package_TO_SOT_THT:TO-92_Inline',
+    },
+  };
+}
+
+function makeBjtEntries() {
+  return {
+    npn: makeBjt(1, 'NPN Transistor', 'Q', {}),
+    pnp: makeBjt(-1, 'PNP Transistor', 'Q', { isE: 8e-15, isC: 8e-14 }),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// MOSFET (nmos/pmos) — quadratic (square-law) model, shared by both polarities
+// ---------------------------------------------------------------------------
+
+function makeMosfet(polarity, label, prefix, params) {
+  return {
+    label, prefix, terminals: 3,
+    defaultParams: { vth: 2.1, kp: 0.5, ...params },
+    defaultRatings: { maxCurrent: 0.2, maxPower: 0.4, maxVgs: 20 },
+    paramSchema: [
+      { key: 'vth', label: 'Threshold |Vgs| (V)', type: 'number', min: 0.1 },
+      { key: 'kp', label: 'Transconductance kp (A/V²)', type: 'number', min: 1e-4 },
+    ],
+    _id(comp, vgs, vds) {
+      const vth = comp.params.vth, kp = comp.params.kp;
+      if (vgs <= vth) return 0;
+      const vov = vgs - vth;
+      let id;
+      if (vds < vov) id = kp * (vov * vds - vds * vds / 2); // triode
+      else id = 0.5 * kp * vov * vov; // saturation
+      return Math.max(id, 0);
+    },
+    // id AND its derivative w.r.t. vds at the same operating point, so the
+    // drain-source branch can be stamped as a companion model (like a diode)
+    // instead of a bare floating current source — needed for Newton to
+    // converge instead of diverging on the unconstrained D-S loop.
+    _idAndGds(comp, vgs, vds) {
+      const vth = comp.params.vth, kp = comp.params.kp;
+      if (vgs <= vth) return { id: 0, gds: 1e-9 };
+      const vov = vgs - vth;
+      if (vds < vov) {
+        const id = kp * (vov * vds - vds * vds / 2);
+        const gds = Math.max(kp * (vov - vds), 1e-9);
+        return { id: Math.max(id, 0), gds };
+      }
+      const id = 0.5 * kp * vov * vov;
+      const gds = Math.max(kp * vov * 0.02, 1e-9); // channel-length modulation, lambda~0.02
+      return { id, gds };
+    },
+    stamp(comp, ctx) {
+      const [d, g, sN] = comp.nodes;
+      const s = comp.state;
+      if (s.failed === 'short') { stampResistor(ctx, d, sN, 1 / FAIL_SHORT_G); return; }
+      const vgs = polarity * (ctx.vNode(g) - ctx.vNode(sN));
+      const vds = polarity * (ctx.vNode(d) - ctx.vNode(sN));
+      const { id, gds } = this._idAndGds(comp, vgs, vds);
+      const dP = polarity > 0 ? d : sN, dN = polarity > 0 ? sN : d;
+      const K = id - gds * vds;
+      stampCompanion(ctx, dP, dN, gds, K);
+    },
+    computeState(comp, ctx) {
+      const [d, g, sN] = comp.nodes;
+      const s = comp.state;
+      const vgsRaw = ctx.vNode(g) - ctx.vNode(sN);
+      const vdsRaw = ctx.vNode(d) - ctx.vNode(sN);
+      s.vgs = vgsRaw;
+      s.v = vdsRaw;
+      if (s.failed === 'short') {
+        s.i = vdsRaw / (1 / FAIL_SHORT_G);
+        s.p = Math.abs(s.v * s.i);
+        return;
+      }
+      const vgs = polarity * vgsRaw;
+      const vds = polarity * vdsRaw;
+      const id = this._id(comp, vgs, vds);
+      s.i = polarity * id;
+      s.p = Math.abs(vdsRaw * s.i);
+    },
+    postStep(comp, dt) {
+      const s = comp.state;
+      clearJustFailed(s);
+      if (s.failed) return;
+      const maxVgs = comp.ratings.maxVgs;
+      if (Math.abs(s.vgs) > maxVgs) {
+        markFailed(s, 'short', `${comp.id} gate oxide punch-through: |Vgs| ${Math.abs(s.vgs).toFixed(1)}V exceeded ${maxVgs}V max`);
+        return;
+      }
+      const maxI = comp.ratings.maxCurrent, maxP = comp.ratings.maxPower;
+      const ratio = Math.max(Math.abs(s.i) / maxI, Math.abs(s.p) / maxP);
+      if (ratio > 1) {
+        s.temp = (s.temp || 0) + dt * (ratio - 1) / 0.8;
+      } else {
+        s.temp = Math.max((s.temp || 0) - dt * 0.25, 0);
+      }
+      if (s.temp >= 1) {
+        markFailed(s, 'short', `${comp.id} burned out: ${(Math.abs(s.p) * 1000).toFixed(0)} mW > ${(maxP * 1000).toFixed(0)} mW max`);
+      }
+    },
+    spice(comp, nn) {
+      const model = polarity > 0 ? 'NMOS' : 'PMOS';
+      return `M${comp.id} ${nn[0]} ${nn[1]} ${nn[2]} ${nn[2]} MMOD_${comp.id}\n.MODEL MMOD_${comp.id} ${model}(VTO=${polarity * comp.params.vth} KP=${comp.params.kp})`;
+    },
+    kicad: {
+      lib: 'Transistor_FET',
+      symbol: polarity > 0 ? 'Q_NMOS_DGS' : 'Q_PMOS_DGS',
+      footprint: 'Package_TO_SOT_THT:TO-92_Inline',
+    },
+  };
+}
+
+function makeMosfetEntries() {
+  return {
+    nmos: makeMosfet(1, 'N-MOSFET', 'M', {}),
+    pmos: makeMosfet(-1, 'P-MOSFET', 'M', { kp: 0.3 }),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -729,6 +985,209 @@ export const ComponentRegistry = {
     postStep(comp) { clearJustFailed(comp.state); },
     spice(comp, nn) { return `R${comp.id} ${nn[0]} ${nn[1]} 0.01`; },
     kicad: { lib: 'Device', symbol: 'R', footprint: 'Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P10.16mm_Horizontal' },
+  },
+
+  // ------------------------------------------------------------------ npn/pnp
+  // Simplified Ebers-Moll BJT: two diode junctions (BE, BC) stamped exactly
+  // like the LED/diode companion model (reusing diodeCompanion/diodeCurrentAt
+  // so convergence relies on the same pnjlim machinery), plus a
+  // beta-controlled collector current recomputed fresh from the latest Newton
+  // iterate each stamp() call (same "fixed point per iteration" idiom the
+  // motor uses for its back-EMF term). `polarity` (+1 npn / -1 pnp) picks
+  // which physical terminal plays the "anode" role of each junction so both
+  // types share one implementation.
+  ...makeBjtEntries(),
+
+  // ------------------------------------------------------------- nmos/pmos
+  // Quadratic (square-law) MOSFET: Id = 0 below Vth, triode/saturation above,
+  // stamped as a controlled current source (same per-iteration idiom as the
+  // BJT above) plus a small stabilizing drain-source conductance.
+  ...makeMosfetEntries(),
+
+  // -------------------------------------------------------------- zener
+  zener: {
+    label: 'Zener Diode', prefix: 'DZ', terminals: 2,
+    defaultParams: { vz: 5.1, is: 1e-14, n: 1.8, isZ: 1e-9, nz: 0.5 },
+    defaultRatings: { maxPower: 0.5 },
+    paramSchema: [
+      { key: 'vz', label: 'Zener Voltage (V)', type: 'number', min: 0.1 },
+      { key: 'is', label: 'Forward Saturation Current (A)', type: 'number', min: 1e-18 },
+    ],
+    stamp(comp, ctx) {
+      const [a, b] = comp.nodes;
+      const s = comp.state;
+      if (s.failed === 'open') { stampResistor(ctx, a, b, 1 / FAIL_OPEN_G); return; }
+      if (s.failed === 'short') { stampResistor(ctx, a, b, 1 / FAIL_SHORT_G); return; }
+      const nVt = (comp.params.n || 1.8) * 0.02585;
+      const nVtZ = (comp.params.nz || 0.5) * 0.02585;
+      const Vf = ctx.vNode(a) - ctx.vNode(b);
+      const { g: gF, K: KF } = diodeCompanion(s, 'zf', comp.params.is, nVt, Vf);
+      stampCompanion(ctx, a, b, gF, KF);
+      // reverse breakdown path: conducts b->a once |Vf| exceeds vz (reverse).
+      // Vr = (Vb-Va) - vz is a SHIFTED variable (offset by the zener voltage)
+      // fed into diodeCompanion purely so its exponential/pnjlim math sees a
+      // "starts conducting at 0" junction; diodeCompanion's own K is linear
+      // in Vr, but stampCompanion(ctx,b,a,g,K) encodes i=g*(Vb-Va)+K against
+      // the RAW node difference, not Vr — so K must be re-based off Vr's
+      // offset (-vz) or the stamped current is off by a spurious g*vz term.
+      const Vr = -Vf - comp.params.vz;
+      const { g: gR, K: KRraw } = diodeCompanion(s, 'zr', comp.params.isZ, nVtZ, Vr);
+      const KR = KRraw - gR * comp.params.vz;
+      stampCompanion(ctx, b, a, gR, KR);
+      // Stash the companion-linearized currents for computeState to reuse —
+      // see the BJT's identical comment: recomputing a bare exponential from
+      // the raw final node voltage can overflow if the outer Newton loop
+      // settled while the junction's own (tiny, at low current) conductance
+      // hadn't yet dominated the node-voltage convergence check.
+      s._iFLast = gF * (ctx.vNode(a) - ctx.vNode(b)) + KF;
+      s._iRLast = gR * (ctx.vNode(b) - ctx.vNode(a)) + KR;
+    },
+    computeState(comp, ctx) {
+      const [a, b] = comp.nodes;
+      const s = comp.state;
+      const v = ctx.vNode(a) - ctx.vNode(b);
+      let i;
+      if (s.failed === 'open') i = v / (1 / FAIL_OPEN_G);
+      else if (s.failed === 'short') i = v / (1 / FAIL_SHORT_G);
+      else {
+        i = (s._iFLast || 0) - (s._iRLast || 0);
+      }
+      s.v = v; s.i = i; s.p = v * i;
+    },
+    postStep(comp, dt) {
+      const s = comp.state;
+      clearJustFailed(s);
+      if (s.failed) return;
+      const maxP = comp.ratings.maxPower;
+      const ratio = Math.abs(s.p) / maxP;
+      if (ratio > 1) {
+        s.temp = (s.temp || 0) + dt * (ratio - 1) / 0.6;
+      } else {
+        s.temp = Math.max((s.temp || 0) - dt * 0.3, 0);
+      }
+      if (s.temp >= 1) {
+        markFailed(s, 'open', `${comp.id} shorted then blew open: ${(Math.abs(s.p) * 1000).toFixed(0)} mW > ${(maxP * 1000).toFixed(0)} mW rated`);
+      }
+    },
+    spice(comp, nn) { return `D${comp.id} ${nn[0]} ${nn[1]} ZMOD_${comp.id}\n.MODEL ZMOD_${comp.id} D(IS=${comp.params.is} BV=${comp.params.vz} IBV=1e-3)`; },
+    kicad: { lib: 'Device', symbol: 'D_Zener', footprint: 'Diode_THT:D_DO-35_SOD27_P7.62mm_Horizontal' },
+  },
+
+  // --------------------------------------------------------------- esp32
+  // Behavioral dev-board model (does NOT run firmware). 6 pins: VIN, GND,
+  // 3V3, GPIO2, GPIO4, GPIO5. Powered via VIN 4.5-12V (onboard regulator
+  // drives 3V3 through a low series resistance) OR by feeding 3V3 directly
+  // (3.0-3.6V). Each GPIO is a Thevenin-style driver (3.3V/0V through ~40R)
+  // in 'high'/'low'/'blink', or a 10M input in 'input' mode / when unpowered
+  // (brownout). Overcurrent fuses that pin open; overvoltage/undervoltage on
+  // any GPIO or overvoltage on VIN kills the whole board (failed='open').
+  esp32: {
+    label: 'ESP32 Dev Board', prefix: 'U', terminals: 6,
+    defaultParams: { gpio2Mode: 'low', gpio4Mode: 'low', gpio5Mode: 'input' },
+    defaultRatings: { gpioMaxCurrent: 0.04, gpioAbsMaxV: 3.6, gpioAbsMinV: -0.3, vinMax: 12 },
+    paramSchema: [
+      { key: 'gpio2Mode', label: 'GPIO2 Mode', type: 'select', options: ['high', 'low', 'blink', 'input'] },
+      { key: 'gpio4Mode', label: 'GPIO4 Mode', type: 'select', options: ['high', 'low', 'blink', 'input'] },
+      { key: 'gpio5Mode', label: 'GPIO5 Mode', type: 'select', options: ['high', 'low', 'blink', 'input'] },
+    ],
+    _gpioOut(mode, t) {
+      if (mode === 'high') return 3.3;
+      if (mode === 'low') return 0;
+      if (mode === 'blink') return (((t || 0) % 1) < 0.5) ? 3.3 : 0;
+      return null; // input mode: not driven
+    },
+    stamp(comp, ctx) {
+      const [vin, gnd, v3v3, g2, g4, g5] = comp.nodes;
+      const s = comp.state;
+      if (s.failed) return; // dead board: everything floats (global gmin only)
+      const pins = { GPIO2: g2, GPIO4: g4, GPIO5: g5 };
+      const modes = { GPIO2: comp.params.gpio2Mode, GPIO4: comp.params.gpio4Mode, GPIO5: comp.params.gpio5Mode };
+      const vVin = ctx.vNode(vin) - ctx.vNode(gnd);
+      const vV3 = ctx.vNode(v3v3) - ctx.vNode(gnd);
+      const vinOk = vVin >= 4.5 && vVin <= 12;
+      const v3Ok = vV3 >= 3.0 && vV3 <= 3.6;
+      const powered = vinOk || v3Ok;
+      if (vinOk) {
+        // onboard regulator: drives the 3V3 rail from VIN through ~5 ohm.
+        stampCompanion(ctx, v3v3, gnd, 1 / 5, -(1 / 5) * 3.3);
+      }
+      for (const name of Object.keys(pins)) {
+        const pin = pins[name];
+        if (s.pinFailed && s.pinFailed[name]) { stampResistor(ctx, pin, gnd, 1 / FAIL_OPEN_G); continue; }
+        const mode = modes[name];
+        if (!powered || mode === 'input') { stampResistor(ctx, pin, gnd, 10e6); continue; }
+        const target = this._gpioOut(mode, ctx.time);
+        stampCompanion(ctx, pin, gnd, 1 / 40, -(1 / 40) * target);
+      }
+    },
+    computeState(comp, ctx) {
+      const [vin, gnd, v3v3, g2, g4, g5] = comp.nodes;
+      const s = comp.state;
+      const vVin = ctx.vNode(vin) - ctx.vNode(gnd);
+      const vV3 = ctx.vNode(v3v3) - ctx.vNode(gnd);
+      s.vin = vVin;
+      s.v = vV3;
+      s.i = 0;
+      s.p = 0;
+      if (s.failed) {
+        s.brownout = true;
+        s.gpio = { GPIO2: 0, GPIO4: 0, GPIO5: 0 };
+        s.status = `DEAD — ${s.failureMsg || 'failed'}`;
+        return;
+      }
+      const pins = { GPIO2: g2, GPIO4: g4, GPIO5: g5 };
+      const modes = { GPIO2: comp.params.gpio2Mode, GPIO4: comp.params.gpio4Mode, GPIO5: comp.params.gpio5Mode };
+      const vinOk = vVin >= 4.5 && vVin <= 12;
+      const v3Ok = vV3 >= 3.0 && vV3 <= 3.6;
+      const powered = vinOk || v3Ok;
+      s.brownout = !powered;
+      if (!s.pinFailed) s.pinFailed = { GPIO2: false, GPIO4: false, GPIO5: false };
+      s.gpio = {};
+      s.pinCurrent = {};
+      for (const name of Object.keys(pins)) {
+        const pin = pins[name];
+        const vPin = ctx.vNode(pin) - ctx.vNode(gnd);
+        s.gpio[name] = vPin;
+        if (s.pinFailed[name]) { s.pinCurrent[name] = 0; continue; }
+        const mode = modes[name];
+        let iPin;
+        if (!powered || mode === 'input') iPin = vPin / 10e6;
+        else {
+          const target = this._gpioOut(mode, ctx.time);
+          iPin = (target - vPin) / 40;
+        }
+        s.pinCurrent[name] = iPin;
+      }
+      s.status = s.brownout ? 'Brownout (unpowered)' : `Powered — 3V3=${vV3.toFixed(2)}V`;
+    },
+    postStep(comp) {
+      const s = comp.state;
+      clearJustFailed(s);
+      if (s.failed) return;
+      if (!s.pinFailed) s.pinFailed = { GPIO2: false, GPIO4: false, GPIO5: false };
+      const gpio = s.gpio || {};
+      const pinCurrent = s.pinCurrent || {};
+      for (const name of ['GPIO2', 'GPIO4', 'GPIO5']) {
+        if (s.pinFailed[name]) continue;
+        const vPin = gpio[name];
+        if (vPin === undefined) continue;
+        if (vPin > comp.ratings.gpioAbsMaxV || vPin < comp.ratings.gpioAbsMinV) {
+          markFailed(s, 'open', `ESP32 killed: ${vPin.toFixed(1)} V on ${name} exceeds ${comp.ratings.gpioAbsMaxV} V abs max`);
+          return;
+        }
+        const iPin = pinCurrent[name];
+        if (iPin !== undefined && Math.abs(iPin) > comp.ratings.gpioMaxCurrent) {
+          s.pinFailed[name] = true;
+          s.justFailed = true;
+          s.failureMsg = `${comp.id} ${name} bond wire fused: ${(Math.abs(iPin) * 1000).toFixed(0)} mA > ${(comp.ratings.gpioMaxCurrent * 1000).toFixed(0)} mA abs max`;
+        }
+      }
+      if (s.vin !== undefined && s.vin > comp.ratings.vinMax) {
+        markFailed(s, 'open', `ESP32 regulator dead: VIN ${s.vin.toFixed(1)}V exceeded ${comp.ratings.vinMax}V max`);
+      }
+    },
+    spice(comp) { return `* ${comp.id} ESP32 dev board — behavioral GPIO model only, not a native SPICE primitive`; },
+    kicad: { lib: 'MCU_Espressif', symbol: 'ESP32-DEVKITC-32E', footprint: 'Module:ESP32-DEVKITC' },
   },
 };
 

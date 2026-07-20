@@ -107,6 +107,10 @@ const BODY_SIZE = {
   bulb: { w: 64, h: 64 }, fuse: { w: 90, h: 34 }, switch: { w: 90, h: 44 },
   potentiometer: { w: 100, h: 60 }, ground: { w: 50, h: 84 },
   voltmeter: { w: 64, h: 64 }, ammeter: { w: 64, h: 64 },
+  npn: { w: 100, h: 80 }, pnp: { w: 100, h: 80 },
+  nmos: { w: 100, h: 80 }, pmos: { w: 100, h: 80 },
+  zener: { w: 80, h: 36 },
+  esp32: { w: 120, h: 160 },
 };
 const DEFAULT_BODY_SIZE = { w: 90, h: 50 };
 
@@ -114,8 +118,11 @@ const GROUP_MAP = {
   battery: 'sources', ground: 'sources',
   resistor: 'passive', capacitor: 'passive', fuse: 'passive', potentiometer: 'passive',
   diode: 'semiconductors', led: 'semiconductors',
+  npn: 'semiconductors', pnp: 'semiconductors', nmos: 'semiconductors', pmos: 'semiconductors',
+  zener: 'semiconductors',
   motor: 'electromechanical', bulb: 'electromechanical', switch: 'electromechanical',
   voltmeter: 'instruments', ammeter: 'instruments',
+  esp32: 'boards',
 };
 
 function snap(v) { return Math.round(v / GRID) * GRID; }
@@ -146,6 +153,12 @@ const ICONS = {
   ground: '<path d="M12 2v6M6 8h12M8 12h8M10 16h4" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"/>',
   voltmeter: '<circle cx="12" cy="10" r="8" stroke="currentColor" stroke-width="1.6" fill="none"/><text x="12" y="13" font-size="9" text-anchor="middle" fill="currentColor" stroke="none">V</text>',
   ammeter: '<circle cx="12" cy="10" r="8" stroke="currentColor" stroke-width="1.6" fill="none"/><text x="12" y="13" font-size="9" text-anchor="middle" fill="currentColor" stroke="none">A</text>',
+  npn: '<path d="M2 10h6M8 4v12M8 6l10-4M8 14l10 4M14 6v-4M14 14v4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M13 8l4 2-2 3" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linejoin="round"/>',
+  pnp: '<path d="M2 10h6M8 4v12M8 6l10-4M8 14l10 4M14 6v-4M14 14v4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M11 12l-4-2 2-3" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linejoin="round"/>',
+  nmos: '<path d="M2 10h5M7 3v14M10 4v5M10 9v3M10 15v-3M10 7l8-3M10 13l8 3M18 4v-4M18 16v4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/>',
+  pmos: '<path d="M2 10h5M7 3v14M10 4v5M10 9v3M10 15v-3M10 7l8-3M10 13l8 3M18 4v-4M18 16v4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/><circle cx="8.5" cy="10" r="1.6" stroke="currentColor" stroke-width="1.2" fill="none"/>',
+  zener: '<path d="M2 10h6l6-6v12l-6-6M14 4v12M11 4h3M14 16h3M20 10h4" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linejoin="round"/>',
+  esp32: '<rect x="4" y="2" width="16" height="16" rx="1.5" stroke="currentColor" stroke-width="1.4" fill="none"/><path d="M0 6h4M0 10h4M0 14h4M20 6h4M20 10h4M20 14h4" stroke="currentColor" stroke-width="1.4"/><circle cx="15" cy="6" r="1.4" fill="currentColor"/>',
 };
 const DEFAULT_ICON = '<rect x="3" y="4" width="18" height="12" rx="2" stroke="currentColor" stroke-width="1.6" fill="none"/>';
 
