@@ -21,6 +21,7 @@ import { importFromUrl, importFromText } from './io/import.js';
 import {
   toSpiceNetlist, toKicadNetlist, saveJson, loadJson, downloadText,
 } from './io/export.js';
+import { encodeCircuit, decodeCircuit } from './io/share.js';
 
 const canvas = document.getElementById('canvas');
 const editor = new Editor(canvas, ComponentRegistry);
@@ -39,7 +40,56 @@ let lastWarning = null;
 const PHYS_DT = 50e-6;   // 50 µs physics step
 const MAX_STEPS_PER_FRAME = 2000;
 
-editor.onChange(() => { netlistDirty = true; });
+// ---------------------------------------------------------------------------
+// Autosave — every editor change (debounced) is persisted to localStorage so
+// a reload/crash doesn't lose work. Wrapped defensively: private-mode /
+// quota-exceeded localStorage failures must never break the app.
+// ---------------------------------------------------------------------------
+
+const AUTOSAVE_KEY = 'simcuit-autosave-v1';
+const AUTOSAVE_DEBOUNCE_MS = 500;
+
+// While true, the next onChange notification is treated as "we just
+// programmatically loaded a circuit", not a user edit, and is not autosaved.
+// Set/cleared synchronously around each editor.loadCircuit() call made by
+// this file's startup/New/import code, so it never leaks across a real user
+// action (loadCircuit's own change notification fires synchronously inside
+// the call).
+let suppressAutosave = false;
+
+let autosaveTimer = null;
+function scheduleAutosave() {
+  if (autosaveTimer) clearTimeout(autosaveTimer);
+  autosaveTimer = setTimeout(() => {
+    autosaveTimer = null;
+    safeSetAutosave(saveJson(editor.getCircuit()));
+  }, AUTOSAVE_DEBOUNCE_MS);
+}
+
+function safeSetAutosave(text) {
+  try { localStorage.setItem(AUTOSAVE_KEY, text); } catch { /* quota / unavailable — ignore */ }
+}
+
+function safeGetAutosave() {
+  try { return localStorage.getItem(AUTOSAVE_KEY); } catch { return null; }
+}
+
+function safeClearAutosave() {
+  try { localStorage.removeItem(AUTOSAVE_KEY); } catch { /* ignore */ }
+}
+
+editor.onChange(() => {
+  netlistDirty = true;
+  if (suppressAutosave) return;
+  scheduleAutosave();
+});
+
+// Run `editor.loadCircuit(circuit)` without triggering an autosave write for
+// that programmatic load itself.
+function loadCircuitQuietly(circuit) {
+  suppressAutosave = true;
+  try { editor.loadCircuit(circuit); } finally { suppressAutosave = false; }
+}
 
 function rebuildNetlist() {
   const { components, wires } = editor.getCircuit();
@@ -95,6 +145,60 @@ $('btn-reset').addEventListener('click', () => {
   editor.markDirty();
   editor.showToast('Simulation reset — all parts repaired.', 'info');
 });
+
+$('btn-new').addEventListener('click', () => {
+  const current = editor.getCircuit();
+  if (!circuitMatchesStarter(current)) {
+    const ok = confirm('Start a new circuit? Your current circuit will be discarded and will no longer be auto-restored.');
+    if (!ok) return;
+  }
+  safeClearAutosave();
+  running = false;
+  btnRun.textContent = '▶ Run';
+  btnRun.classList.remove('active');
+  sim.setNetlist([]);
+  loadCircuitQuietly(starterCircuit());
+  centerCameraOnCircuit();
+  netlistDirty = true;
+  editor.showToast('New circuit.', 'info');
+});
+
+$('btn-share').addEventListener('click', async () => {
+  try {
+    const payload = await encodeCircuit(editor.getCircuit());
+    const url = `${location.origin}${location.pathname}${location.search}#c=${payload}`;
+    const copied = await copyToClipboard(url);
+    editor.showToast(
+      copied ? 'Link copied — anyone can open this circuit' : `Copy this link: ${url}`,
+      copied ? 'ok' : 'warn',
+    );
+  } catch (e) {
+    editor.showToast(`Couldn't create share link: ${e.message}`, 'error');
+  }
+});
+
+async function copyToClipboard(text) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch { /* fall through to execCommand fallback */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}
 
 $('btn-repair-all').addEventListener('click', () => {
   const { components } = editor.getCircuit();
@@ -259,6 +363,9 @@ function centerCameraOnCircuit() {
 
 // ---------------------------------------------------------------------------
 // Starter circuit — 9V battery, switch, 220Ω, red LED, ground
+// Returns the plain-object {components, wires} shape (does NOT load it) so
+// it can be used both to load the starter and to compare against the
+// current circuit (see circuitMatchesStarter, used by the "New" button).
 // ---------------------------------------------------------------------------
 
 function starterCircuit() {
@@ -275,11 +382,79 @@ function starterCircuit() {
     { id: 'w4', points: [{ x: 620, y: 340 }, { x: 620, y: 400 }, { x: 420, y: 400 }] },
     { id: 'w5', points: [{ x: 200, y: 340 }, { x: 200, y: 400 }, { x: 420, y: 400 }] },
   ];
-  editor.loadCircuit({ components: [bat, sw, res, led, gnd], wires });
+  return { components: [bat, sw, res, led, gnd], wires };
 }
 
-try { starterCircuit(); centerCameraOnCircuit(); } catch (e) { console.warn('starter circuit failed:', e); }
-editor.showToast('Welcome! Press ▶ Run, then click the switch. Try removing the resistor…', 'info');
+// Structural comparison used by the "New" button's confirm() gate — ignores
+// live simulation fields (state/nodes) that editor.getCircuit() components
+// carry once the sim has run, so an untouched starter circuit still compares
+// equal even mid-run.
+function circuitMatchesStarter(circuit) {
+  const normalize = (c) => JSON.stringify({
+    components: (c.components || []).map((x) => ({
+      id: x.id, type: x.type, x: x.x, y: x.y, rot: x.rot || 0, params: x.params, ratings: x.ratings,
+    })),
+    wires: (c.wires || []).map((w) => ({ id: w.id, points: w.points })),
+  });
+  return normalize(circuit) === normalize(starterCircuit());
+}
+
+// ---------------------------------------------------------------------------
+// Startup — priority order:
+//   1. #c=<payload> share link in the URL hash
+//   2. ?qa= hooks (deterministic starter circuit, so QA screenshots stay
+//      reproducible — see qaHook() below)
+//   3. autosave restored from localStorage
+//   4. default starter circuit
+// decodeCircuit() is async (Web Streams-based decompression), so the whole
+// sequence is wrapped in an async function and everything downstream
+// (qaHook, the render loop already started above via requestAnimationFrame)
+// tolerates running before or after this resolves.
+// ---------------------------------------------------------------------------
+
+async function boot() {
+  let loaded = false;
+
+  const hashMatch = /^#c=(.+)$/.exec(location.hash);
+  if (hashMatch) {
+    try {
+      const circuit = await decodeCircuit(hashMatch[1]);
+      loadCircuitQuietly(circuit);
+      centerCameraOnCircuit();
+      editor.showToast('Loaded shared circuit', 'ok');
+      loaded = true;
+    } catch (e) {
+      editor.showToast(`Couldn't load shared link: ${e.message}`, 'error');
+    }
+  }
+
+  const qaFlags = (new URLSearchParams(location.search).get('qa') || '')
+    .split(',').map((s) => s.trim());
+  const qaActive = qaFlags.includes('run') || qaFlags.includes('blow') || qaFlags.includes('t2000');
+
+  if (!loaded && !qaActive) {
+    const saved = safeGetAutosave();
+    if (saved) {
+      try {
+        loadCircuitQuietly(loadJson(saved));
+        centerCameraOnCircuit();
+        editor.showToast('Restored your last session', 'info');
+        loaded = true;
+      } catch (e) {
+        console.warn('autosave restore failed:', e);
+      }
+    }
+  }
+
+  if (!loaded) {
+    try { loadCircuitQuietly(starterCircuit()); centerCameraOnCircuit(); } catch (e) { console.warn('starter circuit failed:', e); }
+  }
+
+  editor.showToast('Welcome! Press ▶ Run, then click the switch. Try removing the resistor…', 'info');
+
+  qaHook();
+}
+boot();
 
 // ---------------------------------------------------------------------------
 // DEV-ONLY: ?qa= visual-QA hook. Not part of the product — lets a headless
@@ -291,7 +466,7 @@ editor.showToast('Welcome! Press ▶ Run, then click the switch. Try removing th
 // synchronously so the screenshot lands inside the ~2s smoke-wisp window
 // instead of racing real wall-clock timing). Harmless no-op without ?qa=.
 // ---------------------------------------------------------------------------
-(function qaHook() {
+function qaHook() {
   const qa = new URLSearchParams(location.search).get('qa') || '';
   if (!qa) return;
   const flags = qa.split(',').map(s => s.trim());
@@ -335,4 +510,4 @@ editor.showToast('Welcome! Press ▶ Run, then click the switch. Try removing th
     btnRun.textContent = '▶ Run';
     btnRun.classList.remove('active');
   }
-})();
+}
