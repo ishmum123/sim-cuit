@@ -46,6 +46,10 @@ const BODY_SIZE = {
   bulb: { w: 64, h: 64 }, fuse: { w: 90, h: 34 }, switch: { w: 90, h: 44 },
   potentiometer: { w: 100, h: 60 }, ground: { w: 50, h: 84 },
   voltmeter: { w: 64, h: 64 }, ammeter: { w: 64, h: 64 },
+  npn: { w: 100, h: 80 }, pnp: { w: 100, h: 80 },
+  nmos: { w: 100, h: 80 }, pmos: { w: 100, h: 80 },
+  zener: { w: 80, h: 36 },
+  esp32: { w: 120, h: 160 },
 };
 const DEFAULT_BODY_SIZE = { w: 90, h: 50 };
 function bodySize(type) { return BODY_SIZE[type] || DEFAULT_BODY_SIZE; }
@@ -720,6 +724,135 @@ function drawMeter(ctx, comp, s, label, unit, valueFn) {
   ctx.fillText(valueFn(s), 0, 40);
 }
 
+// Terminals per terminalOffsets(): collector(40,-20)/drain(40,-20), base/gate
+// (-40,0), emitter(40,20)/source(40,20) — leads must land exactly there.
+function drawBjt(ctx, comp, s, t, color, polarity) {
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(-8, -16); ctx.lineTo(-8, 16);
+  ctx.stroke();
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(-40, 0); ctx.lineTo(-8, 0);
+  ctx.moveTo(-8, -8); ctx.lineTo(40, -20);
+  ctx.moveTo(-8, 8); ctx.lineTo(40, 20);
+  ctx.stroke();
+  // emitter arrowhead: points away from base for NPN, toward base for PNP
+  const ex = lerp(-8, 40, 0.5), ey = lerp(8, 20, 0.5);
+  const angle = Math.atan2(20 - 8, 40 - (-8));
+  ctx.save();
+  ctx.translate(ex, ey);
+  ctx.rotate(angle + (polarity > 0 ? 0 : Math.PI));
+  ctx.beginPath();
+  ctx.moveTo(-5, -3); ctx.lineTo(5, 0); ctx.lineTo(-5, 3);
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.restore();
+  ctx.font = '10px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = color;
+  ctx.fillText(polarity > 0 ? 'NPN' : 'PNP', 0, -28);
+}
+
+function drawMosfet(ctx, comp, s, t, color, polarity) {
+  ctx.beginPath();
+  ctx.moveTo(-40, 0); ctx.lineTo(-14, 0);
+  ctx.moveTo(-14, -16); ctx.lineTo(-14, 16);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(-6, -16); ctx.lineTo(-6, 16);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(-6, -10); ctx.lineTo(20, -10); ctx.lineTo(40, -20);
+  ctx.moveTo(-6, 10); ctx.lineTo(20, 10); ctx.lineTo(40, 20);
+  ctx.stroke();
+  // gate-arrow indicating channel polarity
+  ctx.save();
+  ctx.translate(-10, 0);
+  ctx.rotate(polarity > 0 ? 0 : Math.PI);
+  ctx.beginPath();
+  ctx.moveTo(-4, -3); ctx.lineTo(4, 0); ctx.lineTo(-4, 3);
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.restore();
+  ctx.font = '10px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = color;
+  ctx.fillText(polarity > 0 ? 'NMOS' : 'PMOS', 0, -28);
+}
+
+function drawZener(ctx, comp, s, t, color) {
+  leadLines(ctx, -12, 9);
+  ctx.beginPath();
+  ctx.moveTo(-6, -12); ctx.lineTo(-6, 12); ctx.lineTo(6, 0);
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
+  // bent cathode bar — the "Z" that distinguishes a zener from a plain diode
+  ctx.beginPath();
+  ctx.moveTo(9, -12); ctx.lineTo(6, -12); ctx.lineTo(6, 12); ctx.lineTo(3, 12);
+  ctx.stroke();
+}
+
+const ESP32_PINS = [
+  { name: 'VIN', key: 'VIN', x: -60, y: -60 },
+  { name: 'GND', key: 'GND', x: -60, y: 0 },
+  { name: '3V3', key: '3V3', x: -60, y: 60 },
+  { name: 'G2', key: 'GPIO2', x: 60, y: -60 },
+  { name: 'G4', key: 'GPIO4', x: 60, y: 0 },
+  { name: 'G5', key: 'GPIO5', x: 60, y: 60 },
+];
+
+function drawEsp32(ctx, comp, s, t, color) {
+  const w = 120, h = 160;
+  ctx.strokeRect(-w / 2, -h / 2, w, h);
+  ctx.beginPath();
+  for (const p of ESP32_PINS) {
+    if (p.x < 0) { ctx.moveTo(p.x, p.y); ctx.lineTo(-w / 2, p.y); }
+    else { ctx.moveTo(w / 2, p.y); ctx.lineTo(p.x, p.y); }
+  }
+  ctx.stroke();
+  ctx.font = '9px ui-monospace, monospace';
+  ctx.fillStyle = color;
+  for (const p of ESP32_PINS) {
+    ctx.textAlign = p.x < 0 ? 'left' : 'right';
+    const lx = p.x < 0 ? -w / 2 + 4 : w / 2 - 4;
+    ctx.fillText(p.name, lx, p.y - 4);
+  }
+  ctx.textAlign = 'center';
+  ctx.font = '12px sans-serif';
+  ctx.fillText('ESP32', 0, 0);
+  if (s.brownout && !s.failed) {
+    ctx.fillStyle = COL.warn;
+    ctx.font = '9px sans-serif';
+    ctx.fillText('BROWNOUT', 0, 16);
+  } else if (!s.failed) {
+    ctx.fillStyle = COL.label;
+    ctx.font = '9px sans-serif';
+    ctx.fillText('DEVKIT', 0, 16);
+  }
+  // onboard LED next to GPIO2, lights from its actual pin voltage
+  const g2v = (s.gpio && s.gpio.GPIO2) || 0;
+  const bright = clamp(g2v / 3.3, 0, 1);
+  const lx2 = 44, ly2 = -60;
+  if (bright > 0.1 && !s.failed) {
+    ctx.save();
+    const grad = ctx.createRadialGradient(lx2, ly2, 1, lx2, ly2, 12);
+    grad.addColorStop(0, 'rgba(77,214,138,0.9)');
+    grad.addColorStop(1, 'rgba(77,214,138,0)');
+    ctx.globalAlpha = bright * 0.8;
+    ctx.fillStyle = grad;
+    ctx.beginPath(); ctx.arc(lx2, ly2, 12, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+  ctx.beginPath();
+  ctx.fillStyle = bright > 0.1 && !s.failed ? COL.ok : '#3a4356';
+  ctx.arc(lx2, ly2, 3, 0, Math.PI * 2);
+  ctx.fill();
+}
+
 const DRAWERS = {
   battery: drawBattery,
   resistor: drawResistor,
@@ -734,4 +867,10 @@ const DRAWERS = {
   ground: drawGround,
   voltmeter: (ctx, comp, s) => drawMeter(ctx, comp, s, 'V', 'V', st => `${(st.v ?? 0).toFixed(2)}V`),
   ammeter: (ctx, comp, s) => drawMeter(ctx, comp, s, 'A', 'A', st => `${((st.i ?? 0) * 1000).toFixed(1)}mA`),
+  npn: (ctx, comp, s, t, color) => drawBjt(ctx, comp, s, t, color, 1),
+  pnp: (ctx, comp, s, t, color) => drawBjt(ctx, comp, s, t, color, -1),
+  nmos: (ctx, comp, s, t, color) => drawMosfet(ctx, comp, s, t, color, 1),
+  pmos: (ctx, comp, s, t, color) => drawMosfet(ctx, comp, s, t, color, -1),
+  zener: drawZener,
+  esp32: drawEsp32,
 };

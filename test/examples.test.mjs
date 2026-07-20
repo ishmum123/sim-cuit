@@ -135,9 +135,43 @@ check('fuse-protects: fuse I²t accumulates under overcurrent', () => {
   assert.ok(fuse.state.i2t > 0.3, `fuse I²t should accumulate to >0.3, got ${fuse.state.i2t}`);
 });
 
+// Test 5: esp32-blink
+check('esp32-blink: circuit loads with an ESP32 board', () => {
+  const ex = loadExample('esp32-blink.json');
+  const esp = ex.components.find(c => c.type === 'esp32');
+  assert.ok(esp, 'esp32-blink should contain an esp32 component');
+  assert.strictEqual(esp.params.gpio2Mode, 'blink', 'GPIO2 should be in blink mode');
+  const led = ex.components.find(c => c.type === 'led');
+  assert.ok(led, 'esp32-blink should contain an LED');
+  const resistor = ex.components.find(c => c.type === 'resistor');
+  assert.ok(resistor, 'esp32-blink should contain a series resistor');
+});
+
+check('esp32-blink: board powers up and GPIO2 blinks the LED', () => {
+  const ex = loadExample('esp32-blink.json');
+  const esp = ex.components.find(c => c.type === 'esp32');
+  const led = ex.components.find(c => c.type === 'led');
+  let sawHigh = false, sawLow = false;
+  assignNodes(ex.components, ex.wires);
+  const sim = new Simulation();
+  sim.setNetlist(ex.components);
+  const dt = 50e-6;
+  const steps = Math.round(2.0 / dt); // cover a full 1Hz blink cycle
+  for (let i = 0; i < steps; i++) {
+    sim.step(dt);
+    if (led.state.brightness > 0.3) sawHigh = true;
+    if (led.state.brightness < 0.05) sawLow = true;
+  }
+  assert.ok(!esp.state.brownout, `board should be powered, brownout=${esp.state.brownout}`);
+  assert.ok(!esp.state.failed, `board should survive, failed=${esp.state.failed}`);
+  assert.ok(!led.state.failed, `LED should survive, failed=${led.state.failureMsg}`);
+  assert.ok(sawHigh, 'LED should light up during the blink high phase');
+  assert.ok(sawLow, 'LED should go dark during the blink low phase');
+});
+
 // Verify that all example files exist and have required structure
 check('all example files exist and are valid JSON', () => {
-  const examples = ['led-basics.json', 'led-killer.json', 'motor-stall.json', 'fuse-protects.json'];
+  const examples = ['led-basics.json', 'led-killer.json', 'motor-stall.json', 'fuse-protects.json', 'esp32-blink.json'];
   for (const name of examples) {
     assert.ok(fs.existsSync(path.join(examplesDir, name)), `${name} should exist`);
     const data = JSON.parse(fs.readFileSync(path.join(examplesDir, name), 'utf8'));

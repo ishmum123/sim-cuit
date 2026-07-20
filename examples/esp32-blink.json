@@ -1,0 +1,66 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-07-20T00:00:00.000Z",
+  "circuit": {
+    "components": [
+      {
+        "id": "B1",
+        "type": "battery",
+        "x": 60,
+        "y": 140,
+        "rot": 90,
+        "params": { "voltage": 9, "internalResistance": 0.5 },
+        "ratings": { "maxCurrent": 5 },
+        "state": { "v": 0, "i": 0, "p": 0, "temp": 0, "failed": null, "failureMsg": null, "justFailed": false }
+      },
+      {
+        "id": "U1",
+        "type": "esp32",
+        "x": 260,
+        "y": 200,
+        "rot": 0,
+        "params": { "gpio2Mode": "blink", "gpio4Mode": "low", "gpio5Mode": "input" },
+        "ratings": { "gpioMaxCurrent": 0.04, "gpioAbsMaxV": 3.6, "gpioAbsMinV": -0.3, "vinMax": 12 },
+        "state": { "v": 0, "i": 0, "p": 0, "temp": 0, "failed": null, "failureMsg": null, "justFailed": false, "brownout": false, "status": null }
+      },
+      {
+        "id": "R1",
+        "type": "resistor",
+        "x": 380,
+        "y": 140,
+        "rot": 0,
+        "params": { "resistance": 220 },
+        "ratings": { "maxPower": 0.25 },
+        "state": { "v": 0, "i": 0, "p": 0, "temp": 0, "failed": null, "failureMsg": null, "justFailed": false }
+      },
+      {
+        "id": "D1",
+        "type": "led",
+        "x": 480,
+        "y": 140,
+        "rot": 0,
+        "params": { "color": "green", "vf": 2.0, "rs": 2, "is": 1e-20, "n": 2.0 },
+        "ratings": { "maxCurrent": 0.03, "surgeCurrent": 0.1 },
+        "state": { "v": 0, "i": 0, "p": 0, "temp": 0, "failed": null, "failureMsg": null, "justFailed": false, "brightness": 0 }
+      },
+      {
+        "id": "GND1",
+        "type": "ground",
+        "x": 400,
+        "y": 340,
+        "rot": 0,
+        "params": {},
+        "ratings": {},
+        "state": { "v": 0, "i": 0, "p": 0, "temp": 0, "failed": null, "failureMsg": null, "justFailed": false }
+      }
+    ],
+    "wires": [
+      { "id": "w1", "points": [{ "x": 60, "y": 100 }, { "x": 200, "y": 100 }, { "x": 200, "y": 140 }] },
+      { "id": "w2", "points": [{ "x": 60, "y": 180 }, { "x": 60, "y": 200 }, { "x": 200, "y": 200 }] },
+      { "id": "w3", "points": [{ "x": 200, "y": 200 }, { "x": 160, "y": 200 }, { "x": 160, "y": 340 }, { "x": 400, "y": 340 }, { "x": 400, "y": 300 }] },
+      { "id": "w4", "points": [{ "x": 320, "y": 140 }, { "x": 340, "y": 140 }] },
+      { "id": "w5", "points": [{ "x": 420, "y": 140 }, { "x": 440, "y": 140 }] },
+      { "id": "w6", "points": [{ "x": 520, "y": 140 }, { "x": 520, "y": 340 }, { "x": 400, "y": 340 }] }
+    ]
+  }
+}

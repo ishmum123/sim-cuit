@@ -228,5 +228,179 @@ section('10. Repair clears failure state');
 }
 
 // ---------------------------------------------------------------------------
+section('11. NPN transistor as a switch: base drive turns on a collector load');
+{
+  resetIdCounters();
+  // Vcc=9V -- Rc=220 -- collector; base driven via Rb=1000 from a 5V rail;
+  // emitter grounded. With no base drive the load resistor should see ~0
+  // current; with 5V base drive the transistor should conduct and pull the
+  // collector down from Vcc.
+  const vcc = mk('battery', 0, 0); vcc.params.voltage = 9; vcc.params.internalResistance = 0.01;
+  const rc = mk('resistor', 1, 0); rc.params.resistance = 220;
+  const vbb = mk('battery', 2, 0); vbb.params.voltage = 5; vbb.params.internalResistance = 0.01;
+  const rb = mk('resistor', 3, 0); rb.params.resistance = 1000;
+  const q = mk('npn', 4, 0);
+  vcc.nodes = [1, 0];
+  rc.nodes = [1, 2];
+  vbb.nodes = [3, 0];
+  rb.nodes = [3, 4];
+  q.nodes = [2, 4, 0]; // collector, base, emitter
+  const sim = new Simulation();
+  sim.setNetlist([vcc, rc, vbb, rb, q]);
+  runFor(sim, 1e-5, 3000);
+  const vc = sim.nodeVoltages[2];
+  assert.ok(!q.state.failed, `transistor should survive normal switching, failed=${q.state.failed}`);
+  assert.ok(q.state.ib > 0.001, `base current should be flowing with 5V base drive, got ${q.state.ib}`);
+  assert.ok(q.state.i > 0.0005, `collector current should be flowing (load turned on), got ${q.state.i}`);
+  assert.ok(vc < 8, `collector voltage should sag well below Vcc=9V when driven on, got ${vc.toFixed(2)}V`);
+  pass(`NPN switch: Ib=${(q.state.ib * 1000).toFixed(2)}mA, Ic=${(q.state.i * 1000).toFixed(2)}mA, Vc=${vc.toFixed(2)}V`);
+}
+
+// ---------------------------------------------------------------------------
+section('12. NPN transistor burns out past its power/current ratings');
+{
+  resetIdCounters();
+  const vcc = mk('battery', 0, 0); vcc.params.voltage = 40; vcc.params.internalResistance = 0.01;
+  const rc = mk('resistor', 1, 0); rc.params.resistance = 50;
+  const vbb = mk('battery', 2, 0); vbb.params.voltage = 5; vbb.params.internalResistance = 0.01;
+  const rb = mk('resistor', 3, 0); rb.params.resistance = 1000;
+  const q = mk('npn', 4, 0);
+  vcc.nodes = [1, 0]; rc.nodes = [1, 2]; vbb.nodes = [3, 0]; rb.nodes = [3, 4]; q.nodes = [2, 4, 0];
+  const sim = new Simulation();
+  sim.setNetlist([vcc, rc, vbb, rb, q]);
+  const dt = 1e-4;
+  let failedAt = -1;
+  for (let i = 0; i < 5000; i++) {
+    sim.step(dt);
+    if (q.state.failed && failedAt < 0) { failedAt = i; break; }
+  }
+  assert.equal(q.state.failed, 'short', `transistor should burn out shorted C-E, failed=${q.state.failed}`);
+  assert.ok(q.state.failureMsg && /mW|max/i.test(q.state.failureMsg), `failureMsg should describe the overage: ${q.state.failureMsg}`);
+  assert.ok(failedAt > 0, 'burnout should not be instantaneous');
+  pass(`NPN burned out at t=${(failedAt * dt).toFixed(3)}s: "${q.state.failureMsg}"`);
+}
+
+// ---------------------------------------------------------------------------
+section('13. MOSFET gate oxide punch-through on overvoltage Vgs');
+{
+  resetIdCounters();
+  const vgg = mk('battery', 0, 0); vgg.params.voltage = 25; vgg.params.internalResistance = 1;
+  const m = mk('nmos', 1, 0);
+  const vdd = mk('battery', 2, 0); vdd.params.voltage = 5; vdd.params.internalResistance = 1;
+  const rd = mk('resistor', 3, 0); rd.params.resistance = 1000;
+  vgg.nodes = [1, 0];
+  vdd.nodes = [4, 0];
+  rd.nodes = [4, 5];
+  m.nodes = [5, 1, 0]; // drain, gate, source
+  const sim = new Simulation();
+  sim.setNetlist([vgg, vdd, rd, m]);
+  runFor(sim, 1e-4, 50);
+  assert.equal(m.state.failed, 'short', `MOSFET should fail short from gate punch-through, failed=${m.state.failed}`);
+  assert.ok(m.state.failureMsg && /punch|Vgs/i.test(m.state.failureMsg), `failureMsg should mention Vgs punch-through: ${m.state.failureMsg}`);
+  pass(`MOSFET punch-through: "${m.state.failureMsg}"`);
+}
+
+// ---------------------------------------------------------------------------
+section('14. MOSFET as a switch (normal Vgs, survives and conducts)');
+{
+  resetIdCounters();
+  const vgg = mk('battery', 0, 0); vgg.params.voltage = 5; vgg.params.internalResistance = 1;
+  const m = mk('nmos', 1, 0);
+  const vdd = mk('battery', 2, 0); vdd.params.voltage = 9; vdd.params.internalResistance = 0.1;
+  const rd = mk('resistor', 3, 0); rd.params.resistance = 220;
+  vgg.nodes = [1, 0];
+  vdd.nodes = [4, 0];
+  rd.nodes = [4, 5];
+  m.nodes = [5, 1, 0];
+  const sim = new Simulation();
+  sim.setNetlist([vgg, vdd, rd, m]);
+  runFor(sim, 1e-5, 3000);
+  assert.ok(!m.state.failed, `MOSFET should survive normal switching, failed=${m.state.failed}`);
+  assert.ok(m.state.i > 0.01, `drain current should flow when gate is driven on, got ${m.state.i}`);
+  pass(`MOSFET switch: Id=${(m.state.i * 1000).toFixed(2)}mA, Vd=${sim.nodeVoltages[5].toFixed(3)}V`);
+}
+
+// ---------------------------------------------------------------------------
+section('15. Zener diode clamps at ~5.1V in reverse breakdown');
+{
+  resetIdCounters();
+  const bat = mk('battery', 0, 0); bat.params.voltage = 12; bat.params.internalResistance = 0.1;
+  const r1 = mk('resistor', 1, 0); r1.params.resistance = 1000;
+  const z = mk('zener', 2, 0); z.params.vz = 5.1;
+  bat.nodes = [3, 0];
+  r1.nodes = [3, 1];
+  z.nodes = [0, 1]; // anode=gnd, cathode=node1 (reverse biased -> breakdown)
+  const sim = new Simulation();
+  sim.setNetlist([bat, r1, z]);
+  runFor(sim, 1e-4, 2000);
+  const vCathode = sim.nodeVoltages[1];
+  assert.ok(Math.abs(vCathode - 5.1) < 0.6, `zener should clamp near 5.1V, got ${vCathode.toFixed(2)}V`);
+  assert.ok(!z.state.failed, `zener should survive within rating, failed=${z.state.failed}`);
+  pass(`Zener clamps at ${vCathode.toFixed(2)}V (rated 5.1V)`);
+}
+
+// ---------------------------------------------------------------------------
+section('16. ESP32 GPIO high through a resistor lights an LED at 3.3V logic level');
+{
+  resetIdCounters();
+  const esp = mk('esp32', 0, 0);
+  esp.params.gpio2Mode = 'high';
+  const vin = mk('battery', 1, 0); vin.params.voltage = 5; vin.params.internalResistance = 0.1;
+  const r1 = mk('resistor', 2, 0); r1.params.resistance = 150;
+  const led = mk('led', 3, 0); led.params.color = 'green';
+  vin.nodes = [10, 0];
+  esp.nodes = [10, 0, 11, 12, 13, 14]; // VIN,GND,3V3,GPIO2,GPIO4,GPIO5
+  r1.nodes = [12, 20];
+  led.nodes = [20, 0];
+  const sim = new Simulation();
+  sim.setNetlist([vin, r1, led, esp]);
+  runFor(sim, 1e-5, 3000);
+  assert.ok(!esp.state.brownout, `board should be powered via VIN, brownout=${esp.state.brownout}`);
+  assert.ok(!esp.state.failed, `board should survive normal use, failed=${esp.state.failed}`);
+  assert.ok(led.state.brightness > 0.1, `LED should light from GPIO2 high, brightness=${led.state.brightness}`);
+  assert.ok(!led.state.failed, `LED should not fuse at logic-level current, failed=${led.state.failed}`);
+  pass(`ESP32 GPIO2 high lights LED: I=${(led.state.i * 1000).toFixed(2)}mA, brightness=${led.state.brightness.toFixed(2)}`);
+}
+
+// ---------------------------------------------------------------------------
+section('17. ESP32 GPIO pin fuses open when shorted to GND (overcurrent)');
+{
+  resetIdCounters();
+  const esp = mk('esp32', 0, 0);
+  esp.params.gpio4Mode = 'high';
+  const vin = mk('battery', 1, 0); vin.params.voltage = 5; vin.params.internalResistance = 0.1;
+  const short = mk('resistor', 2, 0); short.params.resistance = 0.5; // near dead short to GND
+  vin.nodes = [10, 0];
+  esp.nodes = [10, 0, 11, 12, 13, 14];
+  short.nodes = [13, 0]; // GPIO4 to gnd
+  const sim = new Simulation();
+  sim.setNetlist([vin, short, esp]);
+  runFor(sim, 1e-5, 3000);
+  assert.ok(!esp.state.failed, `board itself should stay alive (only the pin fuses), failed=${esp.state.failed}`);
+  assert.ok(esp.state.pinFailed && esp.state.pinFailed.GPIO4, `GPIO4 should be marked pin-failed, pinFailed=${JSON.stringify(esp.state.pinFailed)}`);
+  assert.ok(esp.state.failureMsg && /GPIO4/.test(esp.state.failureMsg), `failureMsg should mention GPIO4: ${esp.state.failureMsg}`);
+  pass(`ESP32 GPIO4 fused: "${esp.state.failureMsg}"`);
+}
+
+// ---------------------------------------------------------------------------
+section('18. ESP32 dies when a GPIO pin is driven past its absolute max voltage');
+{
+  resetIdCounters();
+  const esp = mk('esp32', 0, 0);
+  esp.params.gpio5Mode = 'input';
+  const vin = mk('battery', 1, 0); vin.params.voltage = 5; vin.params.internalResistance = 0.1;
+  const vext = mk('battery', 2, 0); vext.params.voltage = 5; vext.params.internalResistance = 100;
+  vin.nodes = [10, 0];
+  esp.nodes = [10, 0, 11, 12, 13, 14];
+  vext.nodes = [14, 0]; // drives GPIO5 toward 5V through 100 ohm
+  const sim = new Simulation();
+  sim.setNetlist([vin, vext, esp]);
+  runFor(sim, 1e-5, 3000);
+  assert.equal(esp.state.failed, 'open', `board should die from GPIO overvoltage, failed=${esp.state.failed}`);
+  assert.ok(esp.state.failureMsg && /GPIO5|3\.6/.test(esp.state.failureMsg), `failureMsg should mention the offending pin/limit: ${esp.state.failureMsg}`);
+  pass(`ESP32 killed: "${esp.state.failureMsg}"`);
+}
+
+// ---------------------------------------------------------------------------
 console.log(`\n${passCount} checks passed.`);
 process.exit(0);
