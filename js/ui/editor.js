@@ -954,14 +954,17 @@ export class Editor {
   _renderProperties() {
     const empty = document.getElementById('properties-empty');
     const content = document.getElementById('properties-content');
+    const panel = document.getElementById('properties');
     const comp = this.getSelected();
     if (!comp) {
       if (empty) empty.hidden = false;
       if (content) content.hidden = true;
+      if (panel) panel.classList.remove('has-selection');
       return;
     }
     if (empty) empty.hidden = true;
     if (content) content.hidden = false;
+    if (panel) panel.classList.add('has-selection');
 
     document.getElementById('prop-id').textContent = comp.id;
     const def = this.registry[comp.type] || {};

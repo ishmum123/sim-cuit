@@ -54,17 +54,81 @@ const BODY_SIZE = {
 const DEFAULT_BODY_SIZE = { w: 90, h: 50 };
 function bodySize(type) { return BODY_SIZE[type] || DEFAULT_BODY_SIZE; }
 
+// ============================================================ THEME
+// Single source of truth for every canvas color. Vimbones (light, warm)
+// palette; values are read once from the CSS custom properties defined in
+// css/style.css so the canvas always matches the DOM chrome, with hard-coded
+// fallbacks (same hexes) in case getComputedStyle isn't available yet (e.g.
+// under a test runner with no DOM/stylesheet).
+const FALLBACK = {
+  bg: '#F0F0CA',
+  grid: '#C6C6A3',
+  stroke: '#353535',
+  strokeDim: '#5C5C5C',
+  accent: '#286486',
+  accentDark: '#1D5573',
+  warn: '#944927',
+  warnDark: '#803D1C',
+  danger: '#A8334C',
+  dangerDark: '#94253E',
+  ok: '#4F6C31',
+  okDark: '#3F5A22',
+  charred: '#5C5C5C',
+  label: '#5C5C5C',
+  selection: '#D7D7D7',
+  wireIdle: '#5C5C5C',
+  wireHot: '#286486',
+};
+
+function readTheme() {
+  let cs = null;
+  try { cs = getComputedStyle(document.documentElement); } catch { cs = null; }
+  const v = (name, fallback) => {
+    if (!cs) return fallback;
+    const val = cs.getPropertyValue(name).trim();
+    return val || fallback;
+  };
+  return {
+    bg: v('--vb-bg', FALLBACK.bg),
+    grid: v('--vb-surface-2', FALLBACK.grid),
+    stroke: v('--vb-ink', FALLBACK.stroke),
+    strokeDim: v('--vb-ink-muted', FALLBACK.strokeDim),
+    accent: v('--vb-blue', FALLBACK.accent),
+    accentDark: v('--vb-blue-dark', FALLBACK.accentDark),
+    warn: v('--vb-yellow', FALLBACK.warn),
+    warnDark: v('--vb-yellow-dark', FALLBACK.warnDark),
+    danger: v('--vb-red', FALLBACK.danger),
+    dangerDark: v('--vb-red-dark', FALLBACK.dangerDark),
+    ok: v('--vb-green', FALLBACK.ok),
+    okDark: v('--vb-green-dark', FALLBACK.okDark),
+    charred: v('--vb-ink-muted', FALLBACK.charred),
+    label: v('--vb-ink-muted', FALLBACK.label),
+    selection: v('--vb-selection', FALLBACK.selection),
+    wireIdle: v('--vb-ink-muted', FALLBACK.wireIdle),
+    wireHot: v('--vb-blue', FALLBACK.wireHot),
+  };
+}
+
+export const THEME = readTheme();
+
+// COL kept as the internal alias used throughout this file's drawing code —
+// all its values come from THEME (i.e. from the CSS custom properties).
 const COL = {
-  bg: '#151a21',
-  grid: 'rgba(255,255,255,0.045)',
-  stroke: '#c9d3e0',
-  strokeDim: '#5b6478',
-  accent: '#4da3ff',
-  warn: '#ffb454',
-  danger: '#ff5c5c',
-  ok: '#4dd68a',
-  charred: '#4a3a30',
-  label: '#8a93a6',
+  bg: THEME.bg,
+  grid: THEME.grid,
+  stroke: THEME.stroke,
+  strokeDim: THEME.strokeDim,
+  accent: THEME.accent,
+  accentDark: THEME.accentDark,
+  warn: THEME.warn,
+  danger: THEME.danger,
+  dangerDark: THEME.dangerDark,
+  ok: THEME.ok,
+  charred: THEME.charred,
+  label: THEME.label,
+  selection: THEME.selection,
+  wireIdle: THEME.wireIdle,
+  wireHot: THEME.wireHot,
 };
 
 function lerp(a, b, t) { return a + (b - a) * t; }
@@ -76,6 +140,10 @@ function hexToRgb(hex) {
 function rgbLerp(c1, c2, t) {
   const a = hexToRgb(c1), b = hexToRgb(c2);
   return `rgb(${Math.round(lerp(a[0], b[0], t))},${Math.round(lerp(a[1], b[1], t))},${Math.round(lerp(a[2], b[2], t))})`;
+}
+function withAlpha(hex, a) {
+  const [r, g, b] = hexToRgb(hex);
+  return `rgba(${r},${g},${b},${a})`;
 }
 // thermal tint: normal -> orange -> red as temp 0 -> 1
 function thermalColor(temp, base = COL.stroke) {
@@ -187,10 +255,12 @@ export class Renderer {
     for (const p of entry.parts) {
       const lt = clamp(p.life / p.maxLife, 0, 1);
       if (lt >= 1) continue;
-      const alpha = (1 - lt) * 0.35;
+      const alpha = (1 - lt) * 0.42;
       const r = p.size * (1 + lt * 1.8);
       ctx.beginPath();
-      ctx.fillStyle = `rgba(150,155,165,${alpha})`;
+      // smoke needs to read darker than the on-dark-bg gray it used to be,
+      // to stay visible against the light vimbones canvas
+      ctx.fillStyle = withAlpha(COL.strokeDim, alpha);
       ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
       ctx.fill();
     }
@@ -208,7 +278,7 @@ export class Renderer {
     const r = this._visibleWorldRect(editor);
     const startX = Math.floor(r.x0 / GRID) * GRID;
     const startY = Math.floor(r.y0 / GRID) * GRID;
-    ctx.fillStyle = COL.grid;
+    ctx.fillStyle = withAlpha(COL.grid, 0.8);
     const rad = 1.1 / editor.camera.scale;
     for (let x = startX; x <= r.x1; x += GRID) {
       for (let y = startY; y <= r.y1; y += GRID) {
@@ -246,23 +316,23 @@ export class Renderer {
     const forward = !!startHit; // flow drawn start->end if we anchored current at start
 
     const glow = clamp(mag / 0.5, 0, 1);
+    const hot = mag > 0.01;
 
     ctx.save();
     ctx.lineJoin = 'round';
     ctx.lineCap = 'round';
 
-    if (glow > 0.02) {
-      ctx.save();
-      ctx.shadowColor = COL.accent;
-      ctx.shadowBlur = 8 * glow;
-      ctx.strokeStyle = `rgba(77,163,255,${0.25 + glow * 0.3})`;
-      ctx.lineWidth = 4;
+    // Light themes read additive blur poorly, so "conducting" is expressed
+    // as a wider, saturated accent line plus a soft translucent halo instead
+    // of a shadowBlur glow.
+    if (hot) {
+      ctx.strokeStyle = withAlpha(COL.wireHot, 0.16 + glow * 0.18);
+      ctx.lineWidth = 5 + glow * 2.5;
       this._strokePoly(ctx, pts);
-      ctx.restore();
     }
 
-    ctx.strokeStyle = mag > 0.01 ? '#7fb8f5' : '#3a4356';
-    ctx.lineWidth = 2;
+    ctx.strokeStyle = hot ? COL.wireHot : COL.wireIdle;
+    ctx.lineWidth = hot ? 2.4 : 1.8;
     this._strokePoly(ctx, pts);
     ctx.restore();
 
@@ -290,16 +360,16 @@ export class Renderer {
     const count = Math.max(1, Math.floor(total / spacing));
     const phase = (t * speed) % spacing;
 
-    ctx.fillStyle = '#bfe0ff';
+    ctx.fillStyle = COL.accentDark;
     ctx.shadowColor = COL.accent;
-    ctx.shadowBlur = 4;
+    ctx.shadowBlur = 3;
     for (let n = 0; n < count; n++) {
       let d = (n * spacing + phase) % total;
       if (!forward) d = total - d;
       const p = this._pointAtDistance(pts, segLens, total, d);
       if (!p) continue;
       ctx.beginPath();
-      ctx.arc(p.x, p.y, 2.1, 0, Math.PI * 2);
+      ctx.arc(p.x, p.y, 2.3, 0, Math.PI * 2);
       ctx.fill();
     }
     ctx.shadowBlur = 0;
@@ -363,7 +433,7 @@ export class Renderer {
     const dotColor = snapped ? COL.ok : COL.accent;
     ctx.save();
     ctx.setLineDash([6, 5]);
-    ctx.strokeStyle = snapped ? 'rgba(77,214,138,0.9)' : 'rgba(77,163,255,0.8)';
+    ctx.strokeStyle = snapped ? withAlpha(COL.ok, 0.9) : withAlpha(COL.accent, 0.8);
     ctx.lineWidth = 2;
     this._strokePoly(ctx, pts);
     ctx.setLineDash([]);
@@ -422,8 +492,8 @@ export class Renderer {
     const x = Math.min(m.x0, m.x1), y = Math.min(m.y0, m.y1);
     const w = Math.abs(m.x1 - m.x0), h = Math.abs(m.y1 - m.y0);
     ctx.save();
-    ctx.fillStyle = 'rgba(77,163,255,0.10)';
-    ctx.strokeStyle = 'rgba(77,163,255,0.6)';
+    ctx.fillStyle = withAlpha(COL.accent, 0.10);
+    ctx.strokeStyle = withAlpha(COL.accent, 0.6);
     ctx.lineWidth = 1;
     ctx.fillRect(x, y, w, h);
     ctx.strokeRect(x, y, w, h);
@@ -445,7 +515,7 @@ export class Renderer {
     if (selected) {
       ctx.save();
       ctx.strokeStyle = COL.accent;
-      ctx.fillStyle = 'rgba(77,163,255,0.08)';
+      ctx.fillStyle = withAlpha(COL.selection, 0.55);
       ctx.lineWidth = 1.5;
       this._roundRect(ctx, -w / 2 - 8, -h / 2 - 8, w + 16, h + 16, 8);
       ctx.fill();
@@ -453,14 +523,14 @@ export class Renderer {
       ctx.restore();
     } else if (hovered) {
       ctx.save();
-      ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+      ctx.strokeStyle = withAlpha(COL.strokeDim, 0.35);
       ctx.lineWidth = 1;
       this._roundRect(ctx, -w / 2 - 6, -h / 2 - 6, w + 12, h + 12, 7);
       ctx.stroke();
       ctx.restore();
     }
 
-    const strokeColor = s.failed ? COL.charred : thermalColor(s.temp);
+    const strokeColor = s.failed ? COL.dangerDark : thermalColor(s.temp);
     ctx.strokeStyle = strokeColor;
     ctx.fillStyle = strokeColor;
     ctx.lineWidth = 2;
@@ -512,11 +582,11 @@ export class Renderer {
           ctx.fill();
         } else if (isCandidate) {
           ctx.beginPath();
-          ctx.fillStyle = 'rgba(77,163,255,0.20)';
+          ctx.fillStyle = withAlpha(COL.accent, 0.20);
           ctx.arc(local.x, local.y, 5, 0, Math.PI * 2);
           ctx.fill();
           ctx.lineWidth = 1.3;
-          ctx.strokeStyle = 'rgba(77,163,255,0.7)';
+          ctx.strokeStyle = withAlpha(COL.accent, 0.7);
           ctx.stroke();
         } else if (isHoverTerm) {
           ctx.beginPath();
@@ -526,7 +596,7 @@ export class Renderer {
         } else {
           ctx.beginPath();
           ctx.lineWidth = 1.3;
-          ctx.strokeStyle = '#5b6478';
+          ctx.strokeStyle = COL.strokeDim;
           ctx.arc(local.x, local.y, 3.2, 0, Math.PI * 2);
           ctx.stroke();
         }
@@ -609,7 +679,7 @@ function drawBattery(ctx, comp, s) {
   ctx.textAlign = 'center';
   ctx.fillText(`${(comp.params.voltage ?? 9)}V`, 0, -24);
   if (s.charge !== undefined) {
-    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+    ctx.strokeStyle = withAlpha(COL.strokeDim, 0.35);
     ctx.strokeRect(-14, 20, 28, 4);
     ctx.fillStyle = COL.ok;
     ctx.fillRect(-14, 20, 28 * clamp(s.charge, 0, 1), 4);
@@ -637,6 +707,13 @@ function drawDiodeShape(ctx, comp, color, cathodeX = 6) {
   ctx.closePath();
   ctx.fillStyle = color;
   ctx.fill();
+  // hairline outline so pale fills (e.g. a lit white LED) still read clearly
+  // against the light vimbones canvas background
+  ctx.save();
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = COL.stroke;
+  ctx.stroke();
+  ctx.restore();
   ctx.beginPath();
   ctx.moveTo(cathodeX, -12);
   ctx.lineTo(cathodeX, 12);
@@ -954,7 +1031,7 @@ function drawEsp32(ctx, comp, s, t, color) {
     ctx.restore();
   }
   ctx.beginPath();
-  ctx.fillStyle = bright > 0.1 && !s.failed ? COL.ok : '#3a4356';
+  ctx.fillStyle = bright > 0.1 && !s.failed ? COL.ok : COL.strokeDim;
   ctx.arc(lx2, ly2, 3, 0, Math.PI * 2);
   ctx.fill();
 }
