@@ -5,6 +5,7 @@ import assert from 'node:assert';
 import { Simulation } from '../js/engine/solver.js';
 import { createComponent, resetIdCounters } from '../js/engine/components.js';
 import { assignNodes } from '../js/engine/netlist.js';
+import { moveComponentsWithWires } from '../js/ui/dragwires.js';
 
 let failures = 0;
 function check(name, fn) {
@@ -156,6 +157,68 @@ check('splice preserves polyline validity for a multi-bend tapped wire', () => {
     const a = wire.points[i - 1], b = wire.points[i];
     assert.ok(a.x === b.x || a.y === b.y, `segment ${i} is not axis-aligned`);
   }
+});
+
+check('drag: moving one component keeps its wires connected and axis-aligned', () => {
+  const c = starter();
+  const compsIn = c.components.map(x => ({ id: x.id, x: x.x, y: x.y, type: x.type, rot: x.rot }));
+
+  const { components: movedComps, wires: movedWires } =
+    moveComponentsWithWires(compsIn, c.wires, [c.res.id], 0, 80);
+
+  for (const mc of movedComps) {
+    const comp = c.components.find(x => x.id === mc.id);
+    comp.x = mc.x; comp.y = mc.y;
+  }
+  const { ok } = assignNodes(c.components, movedWires);
+  assert.ok(ok);
+  assert.strictEqual(c.sw.nodes[1], c.res.nodes[0], 'switch still wired to resistor after drag');
+  assert.strictEqual(c.res.nodes[1], c.led.nodes[0], 'resistor still wired to LED anode after drag');
+  for (const w of movedWires) {
+    for (let i = 1; i < w.points.length; i++) {
+      const a = w.points[i - 1], b = w.points[i];
+      assert.ok(a.x === b.x || a.y === b.y, `wire ${w.id} segment ${i} not axis-aligned`);
+    }
+  }
+});
+
+check('drag: a vertex tapped from a non-dragged wire stays put; only the moving end reroutes', () => {
+  resetIdCounters();
+  const bat = createComponent('battery', 100, 100);   // terminals (60,100), (140,100)
+  const res = createComponent('resistor', 260, 200);  // terminals (220,200), (300,200)
+  // wireH is an independent run with a tap already spliced in at (220,100);
+  // none of its vertices sit on a dragged terminal, so it must not change.
+  const wireH = { id: 'h', points: [{ x: 140, y: 100 }, { x: 220, y: 100 }, { x: 300, y: 100 }] };
+  // wireW taps off wireH's spliced vertex down to the resistor's left terminal.
+  const wireW = { id: 'w', points: [{ x: 220, y: 100 }, { x: 220, y: 200 }] };
+  const wireHBefore = JSON.parse(JSON.stringify(wireH.points));
+
+  const compsIn = [bat, res].map(x => ({ id: x.id, x: x.x, y: x.y, type: x.type, rot: x.rot }));
+  const { wires: movedWires } = moveComponentsWithWires(compsIn, [wireH, wireW], [res.id], 40, 0);
+
+  const newH = movedWires.find(w => w.id === 'h');
+  const newW = movedWires.find(w => w.id === 'w');
+  assert.deepStrictEqual(newH.points, wireHBefore, 'untouched wire must stay exactly put');
+  // wireW's tap end (shared with wireH) stays; its resistor end follows the drag
+  assert.deepStrictEqual(newW.points[0], { x: 220, y: 100 }, 'tap end anchored to the untouched wire stays put');
+  assert.deepStrictEqual(newW.points[newW.points.length - 1], { x: 260, y: 200 }, 'moving end follows the resistor');
+  for (let i = 1; i < newW.points.length; i++) {
+    const a = newW.points[i - 1], b = newW.points[i];
+    assert.ok(a.x === b.x || a.y === b.y, `wireW segment ${i} not axis-aligned`);
+  }
+});
+
+check('drag: dragging both endpoints\' components translates the connecting wire rigidly', () => {
+  resetIdCounters();
+  const res = createComponent('resistor', 200, 100); // terminals (160,100),(240,100)
+  const led = createComponent('led', 380, 100);       // terminals (340,100),(420,100)
+  const wire = { id: 'w1', points: [{ x: 240, y: 100 }, { x: 340, y: 100 }] };
+
+  const compsIn = [res, led].map(x => ({ id: x.id, x: x.x, y: x.y, type: x.type, rot: x.rot }));
+  const { wires: movedWires } = moveComponentsWithWires(compsIn, [wire], [res.id, led.id], 0, 60);
+
+  assert.deepStrictEqual(movedWires[0].points, [{ x: 240, y: 160 }, { x: 340, y: 160 }],
+    'wire between two dragged components translates rigidly, unchanged shape');
 });
 
 if (failures) { console.error(`${failures} failure(s)`); process.exit(1); }

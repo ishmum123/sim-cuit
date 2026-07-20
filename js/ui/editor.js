@@ -88,6 +88,13 @@
 
 import { createComponent, terminalOffsets, repair } from '../engine/components.js';
 import { SketchRuntime } from '../engine/sketch.js';
+import { moveComponentsWithWires } from './dragwires.js';
+
+// Internal clipboard for copy/duplicate/paste — module-level so it survives
+// across Editor instances is unnecessary (there's only ever one), but keeping
+// it here (rather than on `this`) makes the intent ("no system clipboard
+// involved, this is app-internal only") obvious.
+let _clipboard = null; // { components:[...], wires:[...] } plain-object snapshot form
 
 const DEFAULT_SKETCH = `function setup() { pinMode(4, OUTPUT); }
 function loop() {
@@ -725,6 +732,12 @@ export class Editor {
       this._drag = {
         ids: [...this.selection], offsets: new Map(), moved: false, downPos: pos, toggled: comp,
         preSnapshot: this._snapshotCircuit(),
+        // Original (pre-drag) layout, fed fresh into moveComponentsWithWires()
+        // on every mousemove along with the *total* delta since mousedown —
+        // see js/ui/dragwires.js for why total (not incremental) deltas are
+        // used (avoids drift / compounding elbow inserts).
+        origComponents: this.components.map(c => ({ id: c.id, x: c.x, y: c.y, type: c.type, rot: c.rot })),
+        origWires: this.wires.map(w => ({ id: w.id, points: w.points.map(p => ({ x: p.x, y: p.y })) })),
       };
       for (const id of this._drag.ids) {
         const c = this.components.find(cc => cc.id === id);
@@ -794,11 +807,24 @@ export class Editor {
       if (dxMoved > 3 || dyMoved > 3) this._drag.moved = true;
       if (this._drag.moved) {
         this.canvas.style.cursor = 'move';
-        for (const id of this._drag.ids) {
-          const c = this.components.find(cc => cc.id === id);
-          const off = this._drag.offsets.get(id);
-          c.x = snap(world.x - off.dx);
-          c.y = snap(world.y - off.dy);
+        // All dragged components move together as one rigid group, so any
+        // one of them gives us the group's total delta since mousedown.
+        const anchorId = this._drag.ids[0];
+        const anchorOff = this._drag.offsets.get(anchorId);
+        const anchorOrig = this._drag.origComponents.find(c => c.id === anchorId);
+        const dx = snap(world.x - anchorOff.dx) - anchorOrig.x;
+        const dy = snap(world.y - anchorOff.dy) - anchorOrig.y;
+        const { components: movedComps, wires: movedWires } = moveComponentsWithWires(
+          this._drag.origComponents, this._drag.origWires, this._drag.ids, dx, dy,
+        );
+        for (const nc of movedComps) {
+          if (!this._drag.ids.includes(nc.id)) continue;
+          const live = this.components.find(cc => cc.id === nc.id);
+          if (live) { live.x = nc.x; live.y = nc.y; }
+        }
+        for (const nw of movedWires) {
+          const live = this.wires.find(ww => ww.id === nw.id);
+          if (live) live.points = nw.points;
         }
         this._notify();
       }
@@ -935,6 +961,22 @@ export class Editor {
       return;
     }
 
+    if ((e.metaKey || e.ctrlKey) && (e.key === 'c' || e.key === 'C')) {
+      e.preventDefault();
+      this._copySelection();
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && (e.key === 'v' || e.key === 'V')) {
+      e.preventDefault();
+      this._pasteClipboard();
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && (e.key === 'd' || e.key === 'D')) {
+      e.preventDefault();
+      this._duplicateSelection();
+      return;
+    }
+
     if (e.key === 'Escape') {
       if (this.wiring) { this._cancelWiring(); this._notify(); return; }
       if (this.placingType) {
@@ -992,6 +1034,108 @@ export class Editor {
       this._updateWireHintVisibility();
     }
     this._notify();
+  }
+
+  // ------------------------------------------------------------- clipboard
+  //
+  // Internal (module-level `_clipboard`) only — no system clipboard. Copy
+  // captures the selected components plus any wire whose BOTH endpoints
+  // land exactly on a terminal of a selected component (a wire that only
+  // taps into the selection at one end, e.g. running off to an un-selected
+  // part, is intentionally left out — pasting it would dangle). Paste and
+  // duplicate re-run the copied geometry through createComponent() so every
+  // pasted part gets fresh ids and pristine runtime state (no stale
+  // failed/temp flags), and translate wire points by the exact same delta
+  // as the components so terminal coincidence — and therefore electrical
+  // connectivity — is preserved without any id remapping.
+
+  _cloneSelectionSnapshot() {
+    if (!this.selection.size) return null;
+    const compIds = new Set(this.selection);
+    const comps = this.components.filter(c => compIds.has(c.id));
+    if (!comps.length) return null;
+    const termKeys = new Set();
+    for (const c of comps) {
+      for (const p of terminalWorldPoints(c)) termKeys.add(`${p.x},${p.y}`);
+    }
+    const wires = this.wires.filter(w => {
+      if (w.points.length < 2) return false;
+      const first = w.points[0], last = w.points[w.points.length - 1];
+      return termKeys.has(`${first.x},${first.y}`) && termKeys.has(`${last.x},${last.y}`);
+    });
+    return {
+      components: comps.map(c => ({
+        type: c.type, x: c.x, y: c.y, rot: c.rot,
+        params: JSON.parse(JSON.stringify(c.params || {})),
+        ratings: JSON.parse(JSON.stringify(c.ratings || {})),
+      })),
+      wires: wires.map(w => ({ points: w.points.map(p => ({ x: p.x, y: p.y })) })),
+    };
+  }
+
+  _copySelection() {
+    const snap_ = this._cloneSelectionSnapshot();
+    if (!snap_) return;
+    _clipboard = snap_;
+    const wc = snap_.wires.length;
+    this.showToast(
+      `Copied ${snap_.components.length} part${snap_.components.length === 1 ? '' : 's'}` +
+      (wc ? ` + ${wc} wire${wc === 1 ? '' : 's'}` : ''),
+      'info',
+    );
+  }
+
+  // Instantiates a copy/duplicate snapshot at an (dx,dy) offset, selects the
+  // new parts, and returns the new component list. Caller is responsible for
+  // the undo push (paste and duplicate both want exactly one entry).
+  _materializeSnapshot(snapshot, dx, dy) {
+    const newComps = [];
+    for (const c of snapshot.components) {
+      const nc = createComponent(c.type, c.x + dx, c.y + dy);
+      if (!nc.id || this.components.some(cc => cc.id === nc.id) || newComps.some(cc => cc.id === nc.id)) {
+        nc.id = this._nextId(c.type);
+      }
+      nc.rot = c.rot;
+      nc.params = Object.assign({}, nc.params, JSON.parse(JSON.stringify(c.params || {})));
+      nc.ratings = Object.assign({}, nc.ratings, JSON.parse(JSON.stringify(c.ratings || {})));
+      newComps.push(nc);
+    }
+    const newWires = snapshot.wires.map(w => ({
+      id: this._nextWireId(),
+      points: w.points.map(p => ({ x: p.x + dx, y: p.y + dy })),
+    }));
+    this.components.push(...newComps);
+    this.wires.push(...newWires);
+    this.selection.clear();
+    for (const nc of newComps) this.selection.add(nc.id);
+    this._renderProperties();
+    this._updateWireHintVisibility();
+    this._notify();
+    return newComps;
+  }
+
+  _pasteClipboard() {
+    if (!_clipboard || !_clipboard.components.length) return;
+    this._pushUndo();
+    const minX = Math.min(..._clipboard.components.map(c => c.x));
+    const minY = Math.min(..._clipboard.components.map(c => c.y));
+    let dx, dy;
+    if (this.mouseWorld) {
+      dx = snap(this.mouseWorld.x) - minX;
+      dy = snap(this.mouseWorld.y) - minY;
+    } else {
+      dx = 40; dy = 40;
+    }
+    const added = this._materializeSnapshot(_clipboard, dx, dy);
+    this.showToast(`Pasted ${added.length} part${added.length === 1 ? '' : 's'}`, 'ok');
+  }
+
+  _duplicateSelection() {
+    const snapshot = this._cloneSelectionSnapshot();
+    if (!snapshot) return;
+    this._pushUndo();
+    const added = this._materializeSnapshot(snapshot, 40, 40);
+    this.showToast(`Duplicated ${added.length} part${added.length === 1 ? '' : 's'}`, 'ok');
   }
 
   // ------------------------------------------------------------ properties
