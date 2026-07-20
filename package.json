@@ -5,6 +5,6 @@
   "type": "module",
   "main": "index.html",
   "scripts": {
-    "test": "node test/engine.test.mjs && node test/sketch.test.mjs && node test/io.test.mjs && node test/share.test.mjs && node test/integration.test.mjs && node test/examples.test.mjs"
+    "test": "node test/engine.test.mjs && node test/sketch.test.mjs && node test/io.test.mjs && node test/share.test.mjs && node test/integration.test.mjs && node test/examples.test.mjs && node test/scopebuf.test.mjs && node test/shortcircuit.test.mjs"
   }
 }

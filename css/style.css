@@ -348,6 +348,85 @@ input, textarea { font-family: inherit; font-size: inherit; }
   text-overflow: ellipsis;
 }
 
+/* ---------- Oscilloscope panel ----------
+ * Overlays the bottom of #canvas-wrap (absolute, does not reflow
+ * #main-layout). Invisible/off-screen until >=1 trace exists (.open added by
+ * js/ui/scope.js), and slides back down at 0 traces. While open, the bottom
+ * onboarding hints (#wire-hint / #canvas-hint) are hidden outright rather
+ * than nudged up — see js/ui/scope.js header comment for the rationale. */
+
+#canvas-wrap.scope-open .wire-hint,
+#canvas-wrap.scope-open .canvas-hint {
+  display: none;
+}
+
+.scope-panel {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 180px;
+  background: rgba(240, 240, 202, 0.96);
+  border-top: 1px solid var(--line);
+  box-shadow: 0 -4px 14px rgba(53, 53, 53, 0.08);
+  backdrop-filter: blur(4px);
+  display: flex;
+  flex-direction: column;
+  transform: translateY(100%);
+  transition: transform 0.2s ease;
+  z-index: 25;
+  pointer-events: none;
+}
+.scope-panel.open { transform: translateY(0); pointer-events: auto; }
+
+.scope-legend {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.scope-chip {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 3px 4px 3px 8px;
+  font-size: 11px;
+  flex: 0 0 auto;
+}
+.scope-chip-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.scope-chip-label { color: var(--ink-muted); font-family: var(--mono); }
+.scope-chip-value { color: var(--ink); font-family: var(--mono); font-weight: 600; }
+.scope-chip-x {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--ink-dim);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 5px;
+  border-radius: 50%;
+}
+.scope-chip-x:hover { color: var(--danger); background: var(--danger-soft); }
+
+.scope-canvas {
+  flex: 1 1 auto;
+  display: block;
+  width: 100%;
+}
+
 #toast-stack {
   position: absolute;
   top: 14px;
@@ -542,6 +621,39 @@ input, textarea { font-family: inherit; font-size: inherit; }
 }
 .field-checkbox-row { display: flex; align-items: center; gap: 8px; flex-direction: row; }
 .field-checkbox-row .field-label { order: 2; }
+
+/* ---------- Scope "Plot" probe toggle (properties panel) ---------- */
+
+.plot-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: -2px 0 14px;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.plot-row.active { border-color: var(--accent); background: var(--accent-soft); }
+.plot-toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--ink);
+  cursor: pointer;
+  flex: 1 1 auto;
+}
+.plot-toggle-label input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--accent); }
+.plot-quantity {
+  background: var(--bg);
+  border: 1px solid var(--surface-2);
+  border-radius: 5px;
+  color: var(--ink);
+  padding: 3px 6px;
+  font-size: 11px;
+  font-family: var(--mono);
+}
+.plot-quantity:disabled { opacity: 0.4; }
 
 /* ===================== ESP32 SKETCH PROGRAM PANEL ===================== */
 

@@ -17,6 +17,9 @@ import {
 import { assignNodes } from './engine/netlist.js';
 import { Editor } from './ui/editor.js';
 import { Renderer } from './ui/render.js';
+import { Scope, defaultQuantityForType } from './ui/scope.js';
+import { MAX_TRACES } from './ui/scopebuf.js';
+import { checkShortCircuit } from './sim/shortcircuit.js';
 import { importFromUrl, importFromText } from './io/import.js';
 import {
   toSpiceNetlist, toKicadNetlist, saveJson, loadJson, downloadText,
@@ -27,6 +30,35 @@ const canvas = document.getElementById('canvas');
 const editor = new Editor(canvas, ComponentRegistry);
 const renderer = new Renderer(canvas, editor);
 const sim = new Simulation();
+
+// ---------------------------------------------------------------------------
+// Oscilloscope — see js/ui/scope.js (drawing/DOM) + js/ui/scopebuf.js (pure
+// buffering/trace logic, unit tested). Editor owns the "📈 Plot" toggle UI in
+// the properties panel but knows nothing about traces; this `probeApi` object
+// is the only thing connecting the two, via editor.setProbeApi().
+// ---------------------------------------------------------------------------
+
+const scope = new Scope(document.getElementById('canvas-wrap'), {
+  onRemove: () => editor.markDirty(), // re-render the properties panel's Plot row after an × click
+});
+
+const probeApi = {
+  isProbed: (compId) => scope.getQuantity(compId),
+  toggle: (comp) => {
+    const { action, evicted } = scope.toggle(comp, defaultQuantityForType(comp.type, ComponentRegistry));
+    if (evicted) editor.showToast(`Scope: max ${MAX_TRACES} traces — dropped ${evicted.compId} to plot ${comp.id}.`, 'warn');
+    else if (action === 'added') editor.showToast(`Plotting ${comp.id} on the scope.`, 'info');
+  },
+  setQuantity: (compId, q) => scope.setQuantity(compId, q),
+};
+editor.setProbeApi(probeApi);
+
+// Keep the scope's traces in sync with the live component list — deleting a
+// probed part (or loading a different circuit) removes its trace too.
+editor.onChange(() => {
+  const liveIds = new Set(editor.getCircuit().components.map((c) => c.id));
+  scope.pruneMissing(liveIds);
+});
 
 // ---------------------------------------------------------------------------
 // Simulation loop
@@ -100,6 +132,21 @@ function rebuildNetlist() {
   netlistDirty = false;
 }
 
+// A netlist rebuild (any structural edit, including the layout-driven canvas
+// resize that fires when the properties panel opens/closes) resets sim.time
+// to 0 (see js/engine/solver.js Simulation#setNetlist). If that happens while
+// the scope already holds samples at higher timestamps, guard against a
+// corrupted/broken-looking trace (new low-t samples mixed with stale high-t
+// ones) by starting the scope over — a "the clock rewound" edge case, not a
+// steady-state thing, so simply clearing is the right, simple behavior.
+// `qaAutoRefill`, set only by the ?qa=scope hook (see qaHook() below), lets a
+// headless QA screenshot re-fill the trace deterministically if that same
+// reset happens to land between the hook's own fast-forward and the first
+// paint — real interactive usage doesn't need this (it just keeps recording
+// forward from t=0, same as any other structural edit while running).
+let lastSampleSimTime = 0;
+let qaAutoRefill = null;
+
 let lastT = null;
 function frame(t) {
   if (running) {
@@ -108,13 +155,53 @@ function frame(t) {
     const simTime = (wall / 1000) * speed;
     const steps = Math.min(Math.round(simTime / PHYS_DT), MAX_STEPS_PER_FRAME);
     for (let i = 0; i < steps; i++) sim.step(PHYS_DT);
+    if (steps > 0) {
+      const { components } = editor.getCircuit();
+      if (sim.time < lastSampleSimTime) {
+        scope.clear();
+        if (qaAutoRefill) qaAutoRefill();
+      }
+      lastSampleSimTime = sim.time;
+      // Scope: one decimated sample per rendered frame (see js/ui/scopebuf.js).
+      scope.sample(sim.time, (id) => {
+        const c = components.find((cc) => cc.id === id);
+        return c && c.state;
+      });
+      checkShortCircuits(components);
+    }
   }
   lastT = t;
   editor.tick();
   renderer.draw(t);
+  scope.render(sim.time);
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
+
+// ---------------------------------------------------------------------------
+// Short-circuit advisory — see js/sim/shortcircuit.js (pure, unit tested).
+// Fires once per "episode" (re-arms once current drops back under threshold
+// or the part fails/repairs) so a sustained short doesn't spam toasts.
+// `_scEpisodes` persists across frames/resets by design: Reset already zeros
+// state.i (see btn-reset handler), which itself re-arms every episode.
+// ---------------------------------------------------------------------------
+
+const _scEpisodes = new Map(); // compId -> armed boolean
+
+function checkShortCircuits(components) {
+  for (const c of components) {
+    const def = ComponentRegistry[c.type] || {};
+    const isBattery = c.type === 'battery' || def.visualBase === 'battery';
+    if (!isBattery) continue;
+    const advisory = checkShortCircuit(c, _scEpisodes);
+    if (advisory) {
+      editor.showToast(
+        `Short circuit: ${advisory.id} sourcing ${advisory.current.toFixed(1)} A — look for a direct path across it (note: all ground symbols are the same node).`,
+        'warn',
+      );
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Top bar
@@ -142,6 +229,8 @@ $('btn-reset').addEventListener('click', () => {
   }
   sim.setNetlist([]);
   netlistDirty = true;
+  scope.clear();
+  _scEpisodes.clear();
   editor.markDirty();
   editor.showToast('Simulation reset — all parts repaired.', 'info');
 });
@@ -430,7 +519,7 @@ async function boot() {
 
   const qaFlags = (new URLSearchParams(location.search).get('qa') || '')
     .split(',').map((s) => s.trim());
-  const qaActive = qaFlags.includes('run') || qaFlags.includes('blow') || qaFlags.includes('t2000');
+  const qaActive = qaFlags.includes('run') || qaFlags.includes('blow') || qaFlags.includes('t2000') || qaFlags.includes('scope');
 
   if (!loaded && !qaActive) {
     const saved = safeGetAutosave();
@@ -464,18 +553,60 @@ boot();
 // overcurrents and fuses open, and select it so the properties panel shows
 // the failure banner), "?qa=t2000" (also fast-forward ~2s of sim time
 // synchronously so the screenshot lands inside the ~2s smoke-wisp window
-// instead of racing real wall-clock timing). Harmless no-op without ?qa=.
+// instead of racing real wall-clock timing), "?qa=scope" (probe the LED's
+// current and the battery's current on the oscilloscope, then run — can be
+// combined with t2000, e.g. "?qa=scope,t2000", to see the LED's death spike
+// on the trace). Harmless no-op without ?qa=.
 // ---------------------------------------------------------------------------
+// Shared fast-forward core for the qa hooks below: steps the sim
+// synchronously (bypassing rAF/wall-clock) by `seconds` of sim time,
+// decimating scope samples at roughly the same ~16ms cadence frame() uses so
+// a fast-forwarded trace looks like one recorded in real time — EXCEPT under
+// `stopOnFailure`, where a severe short (see 'blow'/'t2000' below) can push
+// a part like the LED from healthy to fused in as little as ~3ms (a few tens
+// of physics steps): sampling only every ~16ms would land just one sample
+// before the break and lose the death-spike ramp entirely, so that mode
+// samples every single physics step instead — still bounded (it only runs
+// until failure, at most `seconds` of sim time) so it stays cheap.
+// Returns true if it stopped early on a component failure (only relevant
+// when stopOnFailure is set).
+function qaFastForward(components, seconds, { stopOnFailure = false } = {}) {
+  rebuildNetlist();
+  const STEPS = Math.round(seconds / PHYS_DT);
+  const SAMPLE_EVERY = stopOnFailure ? 1 : Math.max(1, Math.round(0.016 / PHYS_DT));
+  let failed = false;
+  for (let i = 0; i < STEPS; i++) {
+    sim.step(PHYS_DT);
+    if (i % SAMPLE_EVERY === 0) {
+      scope.sample(sim.time, (id) => {
+        const c = components.find((cc) => cc.id === id);
+        return c && c.state;
+      });
+    }
+    if (stopOnFailure && components.some(c => c.state && c.state.failed)) { failed = true; break; }
+  }
+  lastSampleSimTime = sim.time;
+  return failed;
+}
+
 function qaHook() {
   const qa = new URLSearchParams(location.search).get('qa') || '';
   if (!qa) return;
   const flags = qa.split(',').map(s => s.trim());
   const has = (f) => flags.includes(f);
-  if (!(has('run') || has('blow') || has('t2000'))) return;
+  if (!(has('run') || has('blow') || has('t2000') || has('scope'))) return;
 
   const { components } = editor.getCircuit();
   const sw = components.find(c => c.id === 'S1');
   if (sw) sw.params.closed = true;
+
+  if (has('scope')) {
+    const led = components.find(c => c.type === 'led');
+    const bat = components.find(c => c.type === 'battery');
+    if (led) probeApi.toggle(led); // default quantity for LED is 'v'; scope wants I here per spec
+    if (led) scope.setQuantity(led.id, 'i');
+    if (bat) probeApi.toggle(bat); // battery default quantity is already 'i'
+  }
 
   if (has('blow') || has('t2000')) {
     const res = components.find(c => c.id === 'R1');
@@ -490,17 +621,11 @@ function qaHook() {
   btnRun.classList.add('active');
 
   if (has('t2000')) {
-    // Fast-forward synchronously (bypassing rAF/wall-clock) until the LED
-    // fails, then stop stepping exactly on the failure step so `justFailed`
-    // is still true for the renderer's next draw() — which spawns the smoke
-    // burst — before handing back to the normal rAF loop for real-time smoke
-    // animation.
-    rebuildNetlist();
-    const MAX_FF_STEPS = Math.round(2 / PHYS_DT);
-    for (let i = 0; i < MAX_FF_STEPS; i++) {
-      sim.step(PHYS_DT);
-      if (components.some(c => c.state && c.state.failed)) break;
-    }
+    // Fast-forward until the LED fails, then stop stepping exactly on the
+    // failure step so `justFailed` is still true for the renderer's next
+    // draw() — which spawns the smoke burst — before handing back to the
+    // normal rAF loop for real-time smoke animation.
+    qaFastForward(components, 2, { stopOnFailure: true });
     // Freeze the sim right here: the next frame()'s rAF tick would otherwise
     // immediately burn through hundreds more physics steps (real/virtual
     // wall-clock dt is much bigger than PHYS_DT) and clear `justFailed`
@@ -509,5 +634,22 @@ function qaHook() {
     running = false;
     btnRun.textContent = '▶ Run';
     btnRun.classList.remove('active');
+  } else if (has('scope')) {
+    // Scope-only (no t2000): fast-forward past a full scope window's worth
+    // of sim time so the trace is already filling the whole canvas at first
+    // paint, rather than depending on however many real rAF ticks happen to
+    // land before a screenshot is taken. Left running=true (Pause button
+    // active) so the screenshot reads as a live scope mid-session rather
+    // than a paused one.
+    //
+    // qaAutoRefill: a netlist rebuild (e.g. the canvas-wrap ResizeObserver's
+    // unavoidable one-time initial callback, which fires shortly after page
+    // load regardless of any real layout change) resets sim.time to 0 — see
+    // the comment above `lastSampleSimTime` near frame(). If that lands
+    // between this fast-forward and the first paint, frame()'s regression
+    // guard detects it and calls this again to deterministically re-fill the
+    // window rather than leaving a screenshot with a half-empty trace.
+    qaAutoRefill = () => qaFastForward(components, 2.2);
+    qaAutoRefill();
   }
 }

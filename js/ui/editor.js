@@ -57,6 +57,16 @@
  *                                                loadCircuit); no-op + toast
  *                                                if nothing to undo
  *   editor.redo()                   -> void   // inverse of undo()
+ *   editor.setProbeApi(api|null)    -> void   // wires up the properties
+ *                                                panel's "📈 Plot" toggle row
+ *                                                to js/ui/scope.js (glue lives
+ *                                                in main.js). api shape:
+ *                                                  { isProbed(id)->'v'|'i'|null,
+ *                                                    toggle(comp)->void,
+ *                                                    setQuantity(id,q)->void }
+ *                                                Editor never imports scope.js
+ *                                                itself — it only renders
+ *                                                whatever `api` reports.
  *
  * Interaction-state fields render.js reads (read-only from render's side):
  *   editor.camera            { x, y, scale }   // world->screen: sx = wx*scale + x
@@ -210,6 +220,7 @@ export class Editor {
     this._suspendHistory = false; // true while a snapshot restore is in progress
     this._wireHintDismissed = this._readWireHintDismissed();
     this._wireHintEl = null;
+    this._probeApi = null; // see setProbeApi() — scope.js glue, wired by main.js
 
     this._bindDom();
     this._bindCanvas();
@@ -301,6 +312,8 @@ export class Editor {
   }
 
   resize() { this._doResize(); }
+
+  setProbeApi(api) { this._probeApi = api; this._renderProperties(); }
 
   undo() {
     if (!this._history.length) { this.showToast('Nothing to undo', 'info'); return; }
@@ -1159,6 +1172,8 @@ export class Editor {
     const def = this.registry[comp.type] || {};
     document.getElementById('prop-label').textContent = def.label || comp.type;
 
+    this._renderPlotRow(comp);
+
     const paramFields = document.getElementById('param-fields');
     const ratingFields = document.getElementById('rating-fields');
     paramFields.innerHTML = '';
@@ -1183,6 +1198,57 @@ export class Editor {
 
     this._renderSketchSection(comp);
     this._updateReadings(comp);
+  }
+
+  // "📈 Plot" probe toggle — adds/removes `comp` from the oscilloscope (see
+  // js/ui/scope.js). Purely a thin render of whatever this._probeApi reports;
+  // the editor has no idea what a "trace" is. No-op (renders nothing) until
+  // main.js has called setProbeApi().
+  _renderPlotRow(comp) {
+    const container = document.getElementById('plot-row-container');
+    if (!container) return;
+    container.innerHTML = '';
+    const api = this._probeApi;
+    if (!api) return;
+
+    const quantity = api.isProbed(comp.id);
+    const active = quantity !== null;
+
+    const row = document.createElement('div');
+    row.className = 'plot-row' + (active ? ' active' : '');
+
+    const label = document.createElement('label');
+    label.className = 'plot-toggle-label';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = active;
+    const text = document.createElement('span');
+    text.textContent = '📈 Plot';
+    label.appendChild(cb);
+    label.appendChild(text);
+
+    const select = document.createElement('select');
+    select.className = 'plot-quantity';
+    select.disabled = !active;
+    for (const [val, opt] of [['v', 'V'], ['i', 'I']]) {
+      const o = document.createElement('option');
+      o.value = val; o.textContent = opt;
+      if (quantity === val) o.selected = true;
+      select.appendChild(o);
+    }
+
+    cb.addEventListener('change', () => {
+      api.toggle(comp);
+      this._renderPlotRow(comp);
+    });
+    select.addEventListener('change', () => {
+      api.setQuantity(comp.id, select.value);
+      this._renderPlotRow(comp);
+    });
+
+    row.appendChild(label);
+    row.appendChild(select);
+    container.appendChild(row);
   }
 
   _renderSketchSection(comp) {
