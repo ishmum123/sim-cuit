@@ -1,0 +1,54 @@
+{
+  "version": "1.0",
+  "timestamp": "2025-07-20T00:00:00.000Z",
+  "circuit": {
+    "components": [
+      {
+        "id": "B1",
+        "type": "battery",
+        "x": 100,
+        "y": 300,
+        "rot": 90,
+        "params": { "voltage": 9, "internalResistance": 0.5 },
+        "ratings": { "maxCurrent": 5 },
+        "state": { "v": 0, "i": 0, "p": 0, "temp": 0, "failed": null, "failureMsg": null, "justFailed": false }
+      },
+      {
+        "id": "S1",
+        "type": "switch",
+        "x": 200,
+        "y": 200,
+        "rot": 0,
+        "params": { "closed": false },
+        "ratings": { "maxCurrent": 10 },
+        "state": { "v": 0, "i": 0, "p": 0, "temp": 0, "failed": null, "failureMsg": null, "justFailed": false }
+      },
+      {
+        "id": "D1",
+        "type": "led",
+        "x": 300,
+        "y": 300,
+        "rot": 90,
+        "params": { "color": "red", "vf": 2.0, "rs": 2, "is": 1e-20, "n": 2.0 },
+        "ratings": { "maxCurrent": 0.03, "surgeCurrent": 0.1 },
+        "state": { "v": 0, "i": 0, "p": 0, "temp": 0, "failed": null, "failureMsg": null, "justFailed": false, "brightness": 0 }
+      },
+      {
+        "id": "GND1",
+        "type": "ground",
+        "x": 200,
+        "y": 400,
+        "rot": 0,
+        "params": {},
+        "ratings": {},
+        "state": { "v": 0, "i": 0, "p": 0, "temp": 0, "failed": null, "failureMsg": null, "justFailed": false }
+      }
+    ],
+    "wires": [
+      { "id": "w1", "points": [{ "x": 100, "y": 260 }, { "x": 100, "y": 200 }, { "x": 160, "y": 200 }] },
+      { "id": "w2", "points": [{ "x": 240, "y": 200 }, { "x": 300, "y": 200 }, { "x": 300, "y": 260 }] },
+      { "id": "w3", "points": [{ "x": 300, "y": 340 }, { "x": 300, "y": 360 }, { "x": 200, "y": 360 }] },
+      { "id": "w4", "points": [{ "x": 100, "y": 340 }, { "x": 100, "y": 360 }, { "x": 200, "y": 360 }] }
+    ]
+  }
+}

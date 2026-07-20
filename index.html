@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Sim-cuit</title>
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <div id="app">
+
+    <!-- ===================== TOP BAR ===================== -->
+    <header id="topbar">
+      <div class="topbar-group topbar-brand">
+        <span id="brand-mark">Sim-cuit</span>
+      </div>
+
+      <div class="topbar-group">
+        <button id="btn-run" class="btn btn-accent" title="Run / Pause simulation (Space)">
+          <svg viewBox="0 0 16 16" width="14" height="14"><path d="M4 2l10 6-10 6z" fill="currentColor"/></svg>
+          Run
+        </button>
+        <button id="btn-reset" class="btn" title="Reset simulation state">
+          <svg viewBox="0 0 16 16" width="14" height="14"><path d="M8 2a6 6 0 1 0 5.2 3H11.3A4.3 4.3 0 1 1 8 3.7V6l4-3-4-3z" fill="currentColor"/></svg>
+          Reset
+        </button>
+        <label class="speed-control" title="Simulation speed">
+          <span class="speed-label">Speed</span>
+          <input type="range" id="sim-speed" min="0.1" max="4" step="0.1" value="1" />
+          <span id="sim-speed-value" class="speed-value">1.0x</span>
+        </label>
+      </div>
+
+      <div class="topbar-group">
+        <button id="btn-import" class="btn">Import Part…</button>
+
+        <div class="dropdown" id="export-dropdown">
+          <button id="btn-export" class="btn">Export ▾</button>
+          <div class="dropdown-menu" id="export-menu">
+            <button class="dropdown-item" id="export-kicad">KiCad Netlist</button>
+            <button class="dropdown-item" id="export-spice">SPICE Netlist</button>
+            <div class="dropdown-sep"></div>
+            <button class="dropdown-item" id="export-save-json">Save JSON</button>
+            <button class="dropdown-item" id="export-load-json">Load JSON…</button>
+          </div>
+        </div>
+
+        <button id="btn-repair-all" class="btn btn-warn" title="Repair all failed parts">Repair All</button>
+      </div>
+    </header>
+
+    <!-- ===================== MAIN LAYOUT ===================== -->
+    <div id="main-layout">
+
+      <!-- ---------- LEFT PALETTE ---------- -->
+      <aside id="palette">
+        <div class="palette-header">Parts</div>
+        <div id="palette-list" class="palette-list">
+          <!-- palette groups injected by Editor.buildPalette(); static groups below as fallback anchors -->
+          <div class="palette-group" data-group="sources">
+            <div class="palette-group-title">Sources</div>
+            <div class="palette-items" data-group-items="sources"></div>
+          </div>
+          <div class="palette-group" data-group="passive">
+            <div class="palette-group-title">Passive</div>
+            <div class="palette-items" data-group-items="passive"></div>
+          </div>
+          <div class="palette-group" data-group="semiconductors">
+            <div class="palette-group-title">Semiconductors</div>
+            <div class="palette-items" data-group-items="semiconductors"></div>
+          </div>
+          <div class="palette-group" data-group="electromechanical">
+            <div class="palette-group-title">Electromechanical</div>
+            <div class="palette-items" data-group-items="electromechanical"></div>
+          </div>
+          <div class="palette-group" data-group="instruments">
+            <div class="palette-group-title">Instruments</div>
+            <div class="palette-items" data-group-items="instruments"></div>
+          </div>
+          <div class="palette-group" data-group="imported" id="palette-group-imported">
+            <div class="palette-group-title">Imported</div>
+            <div class="palette-items" data-group-items="imported"></div>
+          </div>
+        </div>
+      </aside>
+
+      <!-- ---------- CANVAS ---------- -->
+      <main id="canvas-wrap">
+        <canvas id="canvas"></canvas>
+        <div id="toast-stack" aria-live="polite"></div>
+        <div id="canvas-hint" class="canvas-hint">Click a part, then click the canvas to place. R rotate · Del delete · Esc cancel · Space+drag pan · Ctrl+wheel zoom</div>
+      </main>
+
+      <!-- ---------- RIGHT PROPERTIES PANEL ---------- -->
+      <aside id="properties">
+        <div class="properties-header">Properties</div>
+        <div id="properties-empty" class="properties-empty">Select a component to inspect it.</div>
+        <div id="properties-content" class="properties-content" hidden>
+
+          <div class="prop-title-row">
+            <span id="prop-id" class="prop-id">R1</span>
+            <span id="prop-label" class="prop-label">Resistor</span>
+          </div>
+
+          <div id="failure-banner" class="failure-banner" hidden>
+            <div id="failure-msg" class="failure-msg"></div>
+            <button id="btn-repair-part" class="btn btn-warn btn-small">Repair part</button>
+          </div>
+
+          <div class="readings">
+            <div class="reading"><span class="reading-label">V</span><span id="reading-v" class="reading-value">0.00 V</span></div>
+            <div class="reading"><span class="reading-label">I</span><span id="reading-i" class="reading-value">0.00 A</span></div>
+            <div class="reading"><span class="reading-label">P</span><span id="reading-p" class="reading-value">0.00 W</span></div>
+          </div>
+
+          <div class="temp-row">
+            <span class="temp-label">Thermal stress</span>
+            <div class="temp-bar-track"><div id="temp-bar-fill" class="temp-bar-fill"></div></div>
+          </div>
+
+          <div id="param-fields" class="param-fields"></div>
+          <div id="rating-fields" class="rating-fields"></div>
+        </div>
+      </aside>
+
+    </div>
+  </div>
+
+  <!-- ===================== IMPORT PART MODAL ===================== -->
+  <div id="import-modal" class="modal-overlay" hidden>
+    <div class="modal" role="dialog" aria-labelledby="import-modal-title">
+      <div class="modal-header">
+        <span id="import-modal-title">Import Part</span>
+        <button id="import-modal-close" class="modal-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <label class="modal-label" for="import-url">Fetch from URL (SPICE .model or JSON)</label>
+        <div class="modal-row">
+          <input type="text" id="import-url" class="modal-input" placeholder="https://example.com/part.mod" />
+          <button id="import-url-btn" class="btn">Fetch</button>
+        </div>
+        <div class="modal-divider">or paste directly</div>
+        <textarea id="import-paste" class="modal-textarea" rows="8" placeholder=".MODEL D1N4148 D (IS=2.52e-9 RS=0.568 N=1.752 BV=100)&#10;or JSON: { &quot;name&quot;: &quot;...&quot;, &quot;base&quot;: &quot;led&quot;, &quot;params&quot;: {...}, &quot;ratings&quot;: {...} }"></textarea>
+        <div id="import-error" class="modal-error" hidden></div>
+      </div>
+      <div class="modal-footer">
+        <button id="import-cancel" class="btn">Cancel</button>
+        <button id="import-submit" class="btn btn-accent">Import</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Hidden file input used by "Load JSON" export menu item -->
+  <input type="file" id="load-json-file" accept="application/json,.json" hidden />
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

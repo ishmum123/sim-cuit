@@ -1,0 +1,10 @@
+{
+  "name": "sim-cuit",
+  "version": "1.0.0",
+  "description": "Realistic circuit simulator",
+  "type": "module",
+  "main": "index.html",
+  "scripts": {
+    "test": "node test/engine.test.mjs && node test/io.test.mjs && node test/integration.test.mjs && node test/examples.test.mjs"
+  }
+}
