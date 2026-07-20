@@ -143,6 +143,7 @@ export class Renderer {
     this._drawJunctions(ctx, wires, components);
 
     this._drawWirePreview(ctx, editor);
+    this._drawWireTapHover(ctx, editor);
     this._drawPlacingPreview(ctx, editor);
     this._drawMarquee(ctx, editor);
 
@@ -354,7 +355,7 @@ export class Renderer {
     if (!w) return;
     const pts = [...w.points, ...(w.previewSegments || [])];
     if (pts.length < 2) return;
-    const snapped = !!w.snapTerminal;
+    const snapped = !!w.snapTerminal || !!w.snapWire;
     const dotColor = snapped ? COL.ok : COL.accent;
     ctx.save();
     ctx.setLineDash([6, 5]);
@@ -377,6 +378,25 @@ export class Renderer {
       ctx.arc(last.x, last.y, 9, 0, Math.PI * 2);
       ctx.stroke();
     }
+    ctx.restore();
+  }
+
+  // Discoverability hint: idle-hovering over an existing wire (not wiring
+  // yet) shows the same green halo a snapped terminal gets, at the exact
+  // grid-snapped-onto-segment point a click there would tap into.
+  _drawWireTapHover(ctx, editor) {
+    const h = editor.hoverWireTap;
+    if (!h || editor.wiring) return;
+    ctx.save();
+    ctx.beginPath();
+    ctx.fillStyle = COL.ok;
+    ctx.arc(h.point.x, h.point.y, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.strokeStyle = COL.ok;
+    ctx.lineWidth = 1.6;
+    ctx.arc(h.point.x, h.point.y, 8, 0, Math.PI * 2);
+    ctx.stroke();
     ctx.restore();
   }
 

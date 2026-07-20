@@ -103,5 +103,60 @@ check('mid-segment terminal connection: tap onto a wire segment joins the net', 
   assert.strictEqual(r1.nodes[0], 0);
 });
 
+check('wire tapping: a wire ending mid-segment on another wire is one net', () => {
+  // Mirrors what Editor._spliceTapIntoWire()+_completeWire() actually do:
+  // splice the tap point into the tapped wire's `points` array at the
+  // segment's index, and use that exact same point as the new wire's own
+  // endpoint. Two independent wires with no coincident vertex would NOT be
+  // connected (documented "crossing wires" behavior in netlist.js) — the
+  // splice is what turns a tap into a real shared vertex.
+  resetIdCounters();
+  // Unrotated battery: terminalOffsets = [(-40,0), (40,0)] i.e. terminal 0
+  // (positive) sits at world (60,100) and terminal 1 (negative) at (140,100).
+  const bat = createComponent('battery', 100, 100);  // terminals (60,100)+, (140,100)-
+  const r1 = createComponent('resistor', 300, 100);  // terminals (260,100),(340,100)
+  const gnd = createComponent('ground', 460, 340);   // terminal (460,300)
+
+  // wireA runs straight from battery− to the resistor's left terminal — the
+  // tap point (200,100) sits mid-segment, not at either endpoint.
+  const wireA = { id: 'w1', points: [{ x: 140, y: 100 }, { x: 260, y: 100 }] };
+  const tapPoint = { x: 200, y: 100 };
+  const segIndex = 0; // wireA's only segment: (140,100)->(260,100)
+  wireA.points.splice(segIndex + 1, 0, { x: tapPoint.x, y: tapPoint.y });
+
+  // splice kept the polyline in valid order: original endpoints intact, tap
+  // point inserted strictly between them
+  assert.deepStrictEqual(wireA.points, [{ x: 140, y: 100 }, { x: 200, y: 100 }, { x: 260, y: 100 }]);
+
+  // wireB is the "new wire" a user draws from the tap down and across to
+  // ground, using the exact same tapPoint as its own endpoint — this is what
+  // gives union-find a shared vertex key with wireA.
+  const wireB = { id: 'w2', points: [{ x: 200, y: 100 }, { x: 200, y: 300 }, { x: 460, y: 300 }] };
+
+  const { ok } = assignNodes([bat, r1, gnd], [wireA, wireB]);
+  assert.ok(ok);
+  assert.strictEqual(bat.nodes[1], r1.nodes[0], 'battery− and resistor share the tapped net');
+  assert.strictEqual(bat.nodes[1], gnd.nodes[0], 'the tap also joins that net to ground -> node 0');
+  assert.strictEqual(bat.nodes[1], 0, 'ground pins the shared/tapped net to node 0');
+});
+
+check('splice preserves polyline validity for a multi-bend tapped wire', () => {
+  // Tapping into the middle segment of a 3-segment (4-point) wire must only
+  // insert the new vertex between that segment's own endpoints, leaving the
+  // rest of the polyline's order untouched.
+  const wire = { id: 'w', points: [{ x: 0, y: 0 }, { x: 0, y: 100 }, { x: 100, y: 100 }, { x: 100, y: 0 }] };
+  const segIndex = 1; // the (0,100)->(100,100) segment
+  const tap = { x: 50, y: 100 };
+  wire.points.splice(segIndex + 1, 0, { x: tap.x, y: tap.y });
+  assert.deepStrictEqual(wire.points, [
+    { x: 0, y: 0 }, { x: 0, y: 100 }, { x: 50, y: 100 }, { x: 100, y: 100 }, { x: 100, y: 0 },
+  ]);
+  // every consecutive pair still forms a valid axis-aligned segment
+  for (let i = 1; i < wire.points.length; i++) {
+    const a = wire.points[i - 1], b = wire.points[i];
+    assert.ok(a.x === b.x || a.y === b.y, `segment ${i} is not axis-aligned`);
+  }
+});
+
 if (failures) { console.error(`${failures} failure(s)`); process.exit(1); }
 console.log('All integration checks passed.');

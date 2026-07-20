@@ -52,18 +52,30 @@
  *                                                surface failure toasts. Cheap
  *                                                no-op work when nothing selected.
  *   editor.resize()                 -> void   // call on window/container resize
+ *   editor.undo()                   -> void   // pop last snapshot off the undo
+ *                                                stack and restore it (via
+ *                                                loadCircuit); no-op + toast
+ *                                                if nothing to undo
+ *   editor.redo()                   -> void   // inverse of undo()
  *
  * Interaction-state fields render.js reads (read-only from render's side):
  *   editor.camera            { x, y, scale }   // world->screen: sx = wx*scale + x
  *   editor.selection          Set<string>       // selected component ids
  *   editor.hover              { compId, terminalIndex } | null
+ *   editor.hoverWireTap       { wireId, point:{x,y} } | null
+ *                                // set when idle-hovering (not wiring/dragging/
+ *                                // placing) over an existing wire *segment*
+ *                                // (not just its endpoints) — a discoverability
+ *                                // affordance for "click a wire to tap into it"
  *   editor.wiring             { points:[{x,y}], previewPoint:{x,y},
  *                                previewSegments:[{x,y}],
  *                                snapTerminal:{compId,terminalIndex}|null,
+ *                                snapWire:{wireId,point:{x,y}}|null,
  *                                fromComp, fromTerminal, valid } | null
  *                                // valid === true iff previewPoint is
  *                                // currently snapped onto a legal (non-start)
- *                                // destination terminal — render.js colors
+ *                                // destination terminal OR tapped onto an
+ *                                // existing wire segment — render.js colors
  *                                // the rubber-band preview green in that case.
  *   editor.placingType        string | null
  *   editor.placingPreviewPos  {x,y} | null
@@ -87,6 +99,7 @@ function terminalWorldPoints(comp) {
 
 const GRID = 20;
 const TERMINAL_HIT_R = 9;      // screen px (pre-scale) tolerance for terminal picking
+const WIRE_TAP_HIT_R = 8;      // screen px (pre-scale) tolerance for tapping an existing wire
 const WIRE_HINT_KEY = 'simcuit-wire-hint';
 const BODY_SIZE = {
   battery: { w: 90, h: 50 }, resistor: { w: 90, h: 36 }, led: { w: 70, h: 60 },
@@ -148,6 +161,7 @@ export class Editor {
     this.camera = { x: 0, y: 0, scale: 1 };
     this.selection = new Set();
     this.hover = null;
+    this.hoverWireTap = null;
     this.wiring = null;
     this.placingType = null;
     this.placingPreviewPos = null;
@@ -162,6 +176,10 @@ export class Editor {
     this._drag = null;   // { ids, offsets:Map, moved }
     this._pan = null;    // { startScreen, startCamera }
     this._toastedFailures = new WeakSet();
+    this._history = [];       // undo stack: past snapshots (see _snapshotCircuit)
+    this._redoStack = [];     // redo stack: snapshots undone away from
+    this._historyLimit = 100;
+    this._suspendHistory = false; // true while a snapshot restore is in progress
     this._wireHintDismissed = this._readWireHintDismissed();
     this._wireHintEl = null;
 
@@ -194,6 +212,11 @@ export class Editor {
   }
 
   loadCircuit(circuit) {
+    // Loading a whole new circuit (JSON import, an example, or an undo/redo
+    // restore) is itself an undoable mutation — except when *we're* the ones
+    // doing the restoring (see _restoreSnapshot), which suspends history so
+    // undo/redo don't push onto themselves.
+    if (!this._suspendHistory) this._pushUndoSnapshot(this._snapshotCircuit());
     this.components = (circuit.components || []).map(saved => {
       const c = createComponent(saved.type, saved.x, saved.y);
       c.id = saved.id || c.id;
@@ -248,6 +271,24 @@ export class Editor {
 
   resize() { this._doResize(); }
 
+  undo() {
+    if (!this._history.length) { this.showToast('Nothing to undo', 'info'); return; }
+    const prev = this._history.pop();
+    this._redoStack.push(this._snapshotCircuit());
+    if (this._redoStack.length > this._historyLimit) this._redoStack.shift();
+    this._restoreSnapshot(prev);
+    this.showToast('Undo', 'info');
+  }
+
+  redo() {
+    if (!this._redoStack.length) { this.showToast('Nothing to redo', 'info'); return; }
+    const next = this._redoStack.pop();
+    this._history.push(this._snapshotCircuit());
+    if (this._history.length > this._historyLimit) this._history.shift();
+    this._restoreSnapshot(next);
+    this.showToast('Redo', 'info');
+  }
+
   // --------------------------------------------------------------- camera
 
   worldToScreen(wx, wy) {
@@ -261,6 +302,41 @@ export class Editor {
   // -------------------------------------------------------------- private
 
   _notify() { for (const cb of this._changeListeners) cb(); }
+
+  // ------------------------------------------------------------ undo/redo
+
+  // Plain-object {components, wires} snapshot in the exact shape loadCircuit()
+  // accepts — deliberately WITHOUT live sim `state` (v/i/p/temp/failed/...):
+  // restoring a snapshot always goes through loadCircuit(), which rebuilds
+  // fresh state the same way importing a JSON file or picking an example
+  // circuit does. That means undo/redo while the sim is running resets the
+  // restored parts' readings/failures, matching loadCircuit's existing
+  // behavior rather than inventing a second, subtly different code path.
+  _snapshotCircuit() {
+    return {
+      components: this.components.map(c => ({
+        id: c.id, type: c.type, x: c.x, y: c.y, rot: c.rot,
+        params: JSON.parse(JSON.stringify(c.params || {})),
+        ratings: JSON.parse(JSON.stringify(c.ratings || {})),
+      })),
+      wires: this.wires.map(w => ({ id: w.id, points: w.points.map(p => ({ x: p.x, y: p.y })) })),
+    };
+  }
+
+  _pushUndoSnapshot(snap) {
+    if (this._suspendHistory) return;
+    this._history.push(snap);
+    if (this._history.length > this._historyLimit) this._history.shift();
+    this._redoStack = [];
+  }
+
+  _pushUndo() { this._pushUndoSnapshot(this._snapshotCircuit()); }
+
+  _restoreSnapshot(snap) {
+    this._suspendHistory = true;
+    this.loadCircuit(snap);
+    this._suspendHistory = false;
+  }
 
   _nextId(type) {
     const def = this.registry[type];
@@ -292,6 +368,7 @@ export class Editor {
     document.getElementById('btn-repair-part')?.addEventListener('click', () => {
       const c = this.getSelected();
       if (!c) return;
+      this._pushUndo();
       repair(c);
       this.showToast(`${c.id} repaired`, 'ok');
       this._renderProperties();
@@ -375,7 +452,7 @@ export class Editor {
     c.addEventListener('contextmenu', e => e.preventDefault());
     window.addEventListener('keydown', e => this._onKeyDown(e));
     window.addEventListener('keyup', e => this._onKeyUp(e));
-    c.addEventListener('mouseleave', () => { this.hover = null; if (!this.wiring) this.canvas.style.cursor = 'default'; this._notify(); });
+    c.addEventListener('mouseleave', () => { this.hover = null; this.hoverWireTap = null; if (!this.wiring) this.canvas.style.cursor = 'default'; this._notify(); });
   }
 
   _eventPos(e) {
@@ -419,6 +496,61 @@ export class Editor {
     return null;
   }
 
+  // Hit-test existing wire *segments* (not just vertices) so a wire can be
+  // tapped mid-run — feeds both "start a wire on a wire" and "end a wire on
+  // a wire". Returns the segment's index (so the caller can splice a new
+  // vertex in between its two endpoints) and a point that's grid-snapped
+  // while staying exactly ON the segment (so it stays collinear and doesn't
+  // introduce a visual kink).
+  _hitWireTap(worldPos) {
+    const tol = WIRE_TAP_HIT_R / this.camera.scale;
+    for (let i = this.wires.length - 1; i >= 0; i--) {
+      const wire = this.wires[i];
+      const pts = wire.points;
+      for (let s = 0; s < pts.length - 1; s++) {
+        const a = pts[s], b = pts[s + 1];
+        if (this._distToSeg(worldPos, a, b) <= tol) {
+          return { wire, segIndex: s, point: this._snapPointOnSegment(worldPos, a, b) };
+        }
+      }
+    }
+    return null;
+  }
+
+  _snapPointOnSegment(p, a, b) {
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const len2 = dx * dx + dy * dy;
+    let t = len2 === 0 ? 0 : ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2;
+    t = Math.max(0, Math.min(1, t));
+    const cx = a.x + t * dx, cy = a.y + t * dy;
+    // orthogonal segments (the only kind this app draws): grid-snap along
+    // the segment's axis but clamp to stay between its endpoints.
+    if (a.y === b.y) {
+      const lo = Math.min(a.x, b.x), hi = Math.max(a.x, b.x);
+      return { x: Math.min(hi, Math.max(lo, snap(cx))), y: a.y };
+    }
+    if (a.x === b.x) {
+      const lo = Math.min(a.y, b.y), hi = Math.max(a.y, b.y);
+      return { x: a.x, y: Math.min(hi, Math.max(lo, snap(cy))) };
+    }
+    return { x: cx, y: cy };
+  }
+
+  // Insert `point` as a real vertex in `wire.points` between the segment's
+  // two endpoints (segIndex / segIndex+1), so netlist.js's union-find sees a
+  // shared vertex with whatever new wire endpoint uses this exact point.
+  // No-ops if the point is already one of the segment's endpoints.
+  _spliceTapIntoWire(wire, segIndex, point) {
+    const a = wire.points[segIndex], b = wire.points[segIndex + 1];
+    if ((point.x === a.x && point.y === a.y) || (point.x === b.x && point.y === b.y)) return;
+    wire.points.splice(segIndex + 1, 0, { x: point.x, y: point.y });
+  }
+
+  _isWireStartPoint(point) {
+    const first = this.wiring.points[0];
+    return first.x === point.x && first.y === point.y;
+  }
+
   _distToSeg(p, a, b) {
     const dx = b.x - a.x, dy = b.y - a.y;
     const len2 = dx * dx + dy * dy;
@@ -454,6 +586,7 @@ export class Editor {
     // placing a new component
     if (this.placingType) {
       const sx = snap(world.x), sy = snap(world.y);
+      this._pushUndo();
       const comp = createComponent(this.placingType, sx, sy);
       // createComponent() is expected to assign a unique id per the engine
       // contract; guard against collisions (e.g. re-creation after delete)
@@ -476,7 +609,17 @@ export class Editor {
           // wire — just ignore the click, wiring stays active
           return;
         }
+        this._pushUndo();
         this._completeWire(termHit);
+        return;
+      }
+      // no terminal under the cursor: try tapping onto an existing wire
+      // segment (terminal snapping already took priority above).
+      const tap = this._hitWireTap(world);
+      if (tap && !this._isWireStartPoint(tap.point)) {
+        this._pushUndo();
+        this._spliceTapIntoWire(tap.wire, tap.segIndex, tap.point);
+        this._completeWire({ point: tap.point });
         return;
       }
       // click on empty space: drop an optional manual bend point and keep
@@ -492,10 +635,25 @@ export class Editor {
     if (termHit) {
       this.wiring = {
         points: [termHit.point], fromComp: termHit.comp.id, fromTerminal: termHit.terminalIndex,
-        previewPoint: termHit.point, previewSegments: [], snapTerminal: null, valid: false,
+        previewPoint: termHit.point, previewSegments: [], snapTerminal: null, snapWire: null, valid: false,
       };
       this._notify();
       return;
+    }
+    {
+      // starting a wire by tapping directly onto an existing wire (no
+      // terminal under the cursor)
+      const tap = this._hitWireTap(world);
+      if (tap) {
+        this._pushUndo();
+        this._spliceTapIntoWire(tap.wire, tap.segIndex, tap.point);
+        this.wiring = {
+          points: [tap.point], fromComp: null, fromTerminal: null,
+          previewPoint: tap.point, previewSegments: [], snapTerminal: null, snapWire: null, valid: false,
+        };
+        this._notify();
+        return;
+      }
     }
 
     // component interactions: switch toggle / drag / select
@@ -506,7 +664,10 @@ export class Editor {
         this.selection.add(comp.id);
       }
       this._renderProperties();
-      this._drag = { ids: [...this.selection], offsets: new Map(), moved: false, downPos: pos, toggled: comp };
+      this._drag = {
+        ids: [...this.selection], offsets: new Map(), moved: false, downPos: pos, toggled: comp,
+        preSnapshot: this._snapshotCircuit(),
+      };
       for (const id of this._drag.ids) {
         const c = this.components.find(cc => cc.id === id);
         this._drag.offsets.set(id, { dx: world.x - c.x, dy: world.y - c.y });
@@ -545,12 +706,25 @@ export class Editor {
       const last = this.wiring.points[this.wiring.points.length - 1];
       const termHit = this._hitTerminal(world);
       const snapHit = (termHit && !this._isWireStart(termHit)) ? termHit : null;
-      const sp = snapHit ? snapHit.point : { x: snap(world.x), y: snap(world.y) };
+      let sp, snapWire = null;
+      if (snapHit) {
+        sp = snapHit.point;
+      } else {
+        // terminal snapping takes priority; fall back to wire tapping
+        const tap = this._hitWireTap(world);
+        if (tap && !this._isWireStartPoint(tap.point)) {
+          sp = tap.point;
+          snapWire = { wireId: tap.wire.id, point: tap.point };
+        } else {
+          sp = { x: snap(world.x), y: snap(world.y) };
+        }
+      }
       const bend = this._orthoBend(last, sp);
       this.wiring.previewSegments = [...bend, sp];
       this.wiring.previewPoint = sp;
       this.wiring.snapTerminal = snapHit ? { compId: snapHit.comp.id, terminalIndex: snapHit.terminalIndex } : null;
-      this.wiring.valid = !!snapHit;
+      this.wiring.snapWire = snapWire;
+      this.wiring.valid = !!(snapHit || snapWire);
       this.canvas.style.cursor = 'crosshair';
       this._notify();
       return;
@@ -584,11 +758,22 @@ export class Editor {
     const termHit = this._hitTerminal(world);
     if (termHit) {
       this.hover = { compId: termHit.comp.id, terminalIndex: termHit.terminalIndex };
+      this.hoverWireTap = null;
       this.canvas.style.cursor = 'crosshair';
     } else {
       const comp = this._hitComponent(world);
-      this.hover = comp ? { compId: comp.id, terminalIndex: -1 } : null;
-      this.canvas.style.cursor = comp ? 'move' : 'default';
+      if (comp) {
+        this.hover = { compId: comp.id, terminalIndex: -1 };
+        this.hoverWireTap = null;
+        this.canvas.style.cursor = 'move';
+      } else {
+        // nothing under the cursor: show a tap affordance if hovering an
+        // existing wire, so users discover "click a wire to start from it"
+        const tap = this._hitWireTap(world);
+        this.hover = null;
+        this.hoverWireTap = tap ? { wireId: tap.wire.id, point: tap.point } : null;
+        this.canvas.style.cursor = tap ? 'crosshair' : 'default';
+      }
     }
     this._notify();
   }
@@ -605,15 +790,28 @@ export class Editor {
       const pos = this._eventPos(e);
       const world = this.screenToWorld(pos.x, pos.y);
       const termHit = this._hitTerminal(world);
-      if (termHit && !this._isWireStart(termHit)) this._completeWire(termHit);
+      if (termHit && !this._isWireStart(termHit)) {
+        this._pushUndo();
+        this._completeWire(termHit);
+        return;
+      }
+      const tap = this._hitWireTap(world);
+      if (tap && !this._isWireStartPoint(tap.point)) {
+        this._pushUndo();
+        this._spliceTapIntoWire(tap.wire, tap.segIndex, tap.point);
+        this._completeWire({ point: tap.point });
+      }
       return;
     }
 
     if (this._drag) {
       if (!this._drag.moved && this._drag.toggled && this._drag.toggled.type === 'switch') {
+        this._pushUndoSnapshot(this._drag.preSnapshot);
         const c = this._drag.toggled;
         c.params.closed = !c.params.closed;
         this.showToast(`${c.id} ${c.params.closed ? 'closed' : 'open'}`, 'info');
+      } else if (this._drag.moved) {
+        this._pushUndoSnapshot(this._drag.preSnapshot);
       }
       this._drag = null;
       this._renderProperties();
@@ -666,7 +864,18 @@ export class Editor {
   _onKeyDown(e) {
     if (e.code === 'Space') { this.spacePan = true; return; }
     const tag = document.activeElement && document.activeElement.tagName;
-    if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+    if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
+      e.preventDefault();
+      if (e.shiftKey) this.redo(); else this.undo();
+      return;
+    }
+    if ((e.metaKey || e.ctrlKey) && (e.key === 'y' || e.key === 'Y')) {
+      e.preventDefault();
+      this.redo();
+      return;
+    }
 
     if (e.key === 'Escape') {
       if (this.wiring) { this._cancelWiring(); this._notify(); return; }
@@ -683,6 +892,7 @@ export class Editor {
     }
 
     if ((e.key === 'r' || e.key === 'R') && this.selection.size) {
+      this._pushUndo();
       for (const id of this.selection) {
         const c = this.components.find(cc => cc.id === id);
         if (c) c.rot = (c.rot + 90) % 360;
@@ -693,6 +903,7 @@ export class Editor {
 
     if ((e.key === 'Delete' || e.key === 'Backspace') && this.selection.size) {
       e.preventDefault();
+      this._pushUndo();
       this.components = this.components.filter(c => !this.selection.has(c.id));
       this.selection.clear();
       this._renderProperties();
@@ -780,7 +991,7 @@ export class Editor {
       input = document.createElement('input');
       input.type = 'checkbox';
       input.checked = !!comp[bucket][field.key];
-      input.addEventListener('change', () => { comp[bucket][field.key] = input.checked; this._notify(); });
+      input.addEventListener('change', () => { this._pushUndo(); comp[bucket][field.key] = input.checked; this._notify(); });
     } else if (field.type === 'select' && field.options) {
       input = document.createElement('select');
       for (const opt of field.options) {
@@ -789,7 +1000,7 @@ export class Editor {
         if (comp[bucket][field.key] === opt) o.selected = true;
         input.appendChild(o);
       }
-      input.addEventListener('change', () => { comp[bucket][field.key] = input.value; this._notify(); });
+      input.addEventListener('change', () => { this._pushUndo(); comp[bucket][field.key] = input.value; this._notify(); });
     } else {
       input = document.createElement('input');
       input.type = field.type === 'text' ? 'text' : 'number';
@@ -798,6 +1009,7 @@ export class Editor {
       if (field.step !== undefined) input.step = field.step; else input.step = 'any';
       input.value = comp[bucket][field.key];
       input.addEventListener('change', () => {
+        this._pushUndo();
         const n = field.type === 'text' ? input.value : parseFloat(input.value);
         comp[bucket][field.key] = Number.isNaN(n) ? input.value : n;
         this._notify();
