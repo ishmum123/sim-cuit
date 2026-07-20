@@ -9,6 +9,9 @@
 
 * { box-sizing: border-box; }
 
+/* The hidden attribute must always win, even over display:flex component rules. */
+[hidden] { display: none !important; }
+
 :root {
   /* ---- vimbones base palette (authoritative hexes) ---- */
   --vb-bg: #F0F0CA;
