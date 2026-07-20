@@ -175,6 +175,8 @@ export function repair(comp) {
   s.sketchPins = null;
   s.sketchStatus = null;
   s.sketchLog = null;
+  s.sketchLogTimes = null;
+  s.sketchErrorLine = null;
   if (comp.type === 'switch') {
     // leave user-set closed state alone
   }
@@ -1231,6 +1233,8 @@ export const ComponentRegistry = {
         s.sketchPins = null;
         s.sketchStatus = null;
         s.sketchLog = null;
+        s.sketchLogTimes = null;
+        s.sketchErrorLine = null;
         return;
       }
       if (!s._sketch || s._sketch.source !== comp.params.sketch) {
@@ -1245,6 +1249,8 @@ export const ComponentRegistry = {
         s.sketchPins = null;
         s.sketchStatus = rt.status === 'error' ? rt.error : 'Stopped (unpowered)';
         s.sketchLog = rt.log;
+        s.sketchLogTimes = rt.logTimes;
+        s.sketchErrorLine = rt.errorLine;
         return;
       }
       if (!s._sketchPoweredPrev) rt.reset(); // just powered on: fresh boot
@@ -1254,6 +1260,8 @@ export const ComponentRegistry = {
       s.sketchPins = rt.getPinState();
       s.sketchStatus = rt.status === 'error' ? rt.error : (rt.status === 'running' ? 'Running' : 'Stopped');
       s.sketchLog = rt.log;
+      s.sketchLogTimes = rt.logTimes;
+      s.sketchErrorLine = rt.errorLine;
     },
     spice(comp) { return `* ${comp.id} ESP32 dev board — behavioral GPIO model only, not a native SPICE primitive`; },
     kicad: { lib: 'MCU_Espressif', symbol: 'ESP32-DEVKITC-32E', footprint: 'Module:ESP32-DEVKITC' },

@@ -45,12 +45,20 @@
  *                                                to `registry` (e.g. after
  *                                                io/import.js resolves a PartDef)
  *   editor.showToast(message, kind) -> void   // kind: 'info'|'ok'|'warn'|'error'
- *   editor.tick()                   -> void   // call once per animation frame
+ *   editor.tick(simTime?)            -> void   // call once per animation frame
  *                                                (or per sim step) to refresh the
  *                                                live V/I/P/temp/failure readout
  *                                                in the properties panel and to
  *                                                surface failure toasts. Cheap
  *                                                no-op work when nothing selected.
+ *                                                `simTime` is accepted (main.js
+ *                                                passes `sim.time`) and handed
+ *                                                to the ESP32 sketch panel for
+ *                                                future use; the serial
+ *                                                monitor's "[12.34s]" prefixes
+ *                                                currently come straight from
+ *                                                js/engine/sketch.js's own
+ *                                                per-print sim-time tracking.
  *   editor.resize()                 -> void   // call on window/container resize
  *   editor.undo()                   -> void   // pop last snapshot off the undo
  *                                                stack and restore it (via
@@ -97,21 +105,14 @@
  */
 
 import { createComponent, terminalOffsets, repair } from '../engine/components.js';
-import { SketchRuntime } from '../engine/sketch.js';
 import { moveComponentsWithWires } from './dragwires.js';
+import { SketchPanel } from './sketchpanel.js';
 
 // Internal clipboard for copy/duplicate/paste — module-level so it survives
 // across Editor instances is unnecessary (there's only ever one), but keeping
 // it here (rather than on `this`) makes the intent ("no system clipboard
 // involved, this is app-internal only") obvious.
 let _clipboard = null; // { components:[...], wires:[...] } plain-object snapshot form
-
-const DEFAULT_SKETCH = `function setup() { pinMode(4, OUTPUT); }
-function loop() {
-  digitalWrite(4, HIGH); delay(500);
-  digitalWrite(4, LOW);  delay(500);
-}
-`;
 
 // terminalOffsets(comp) returns ROTATED but component-RELATIVE {dx,dy} pairs
 // (per js/engine/components.js: rotOffset() rotates the local offset but
@@ -221,6 +222,15 @@ export class Editor {
     this._wireHintDismissed = this._readWireHintDismissed();
     this._wireHintEl = null;
     this._probeApi = null; // see setProbeApi() — scope.js glue, wired by main.js
+    // ESP32 "Program (JS sketch)" UX (compact + overlay CodeEditors, pin
+    // badges, serial monitor, templates/API sidebar) — see js/ui/sketchpanel.js.
+    // Constructed here (not lazily) since the panel/overlay DOM is static in
+    // index.html and always present, just hidden until an esp32 is selected.
+    this._sketchPanel = new SketchPanel({
+      pushUndo: () => this._pushUndo(),
+      showToast: (msg, kind) => this.showToast(msg, kind),
+      notify: () => { this._notify(); this._renderProperties(); },
+    });
 
     this._bindDom();
     this._bindCanvas();
@@ -291,11 +301,11 @@ export class Editor {
     }, 4200);
   }
 
-  tick() {
+  tick(simTime) {
     const sel = this.getSelected();
     if (sel) {
       this._updateReadings(sel);
-      if (sel.type === 'esp32') this._updateSketchStatus(sel);
+      if (sel.type === 'esp32') this._sketchPanel.tick(sel, simTime);
     }
     for (const c of this.components) {
       if (c.state && c.state.justFailed && !this._toastedFailures.has(c.state)) {
@@ -314,6 +324,12 @@ export class Editor {
   resize() { this._doResize(); }
 
   setProbeApi(api) { this._probeApi = api; this._renderProperties(); }
+
+  // Opens the ESP32 sketch ⤢ Expand overlay for whatever esp32 is currently
+  // selected (no-op if nothing/non-esp32 is selected). Public mainly for the
+  // ?qa=sketch&overlay=1 dev hook (see js/main.js qaHook()) to reach a state
+  // a headless screenshot script can't get to via real clicks.
+  openSketchOverlay() { this._sketchPanel.openOverlay(); }
 
   undo() {
     if (!this._history.length) { this.showToast('Nothing to undo', 'info'); return; }
@@ -419,39 +435,9 @@ export class Editor {
       this._notify();
     });
 
-    document.getElementById('sketch-upload')?.addEventListener('click', () => {
-      const c = this.getSelected();
-      if (!c || c.type !== 'esp32') return;
-      const textarea = document.getElementById('sketch-source');
-      const source = textarea ? textarea.value : '';
-      this._pushUndo();
-      c.params.sketch = source;
-      c.params.sketchEnabled = true;
-      // dry-compile here purely for immediate UI feedback (toast + inline
-      // red message) — the engine constructs its own SketchRuntime from
-      // c.params.sketch on the next sim step regardless.
-      const probe = new SketchRuntime(source);
-      const errEl = document.getElementById('sketch-error');
-      if (probe.status === 'error') {
-        if (errEl) { errEl.hidden = false; errEl.textContent = probe.error; }
-        this.showToast(`Sketch compile error: ${probe.error}`, 'error');
-      } else {
-        if (errEl) { errEl.hidden = true; errEl.textContent = ''; }
-        this.showToast(`${c.id}: sketch uploaded, running.`, 'ok');
-      }
-      this._notify();
-      this._renderProperties();
-    });
-
-    document.getElementById('sketch-stop')?.addEventListener('click', () => {
-      const c = this.getSelected();
-      if (!c || c.type !== 'esp32') return;
-      this._pushUndo();
-      c.params.sketchEnabled = false;
-      this.showToast(`${c.id}: sketch stopped.`, 'info');
-      this._notify();
-      this._renderProperties();
-    });
+    // Upload/Stop buttons (small panel + overlay footer) are bound inside
+    // SketchPanel itself (see js/ui/sketchpanel.js _bind()) since it owns
+    // both the compact and overlay copies of each control.
   }
 
   // ---- first-run wiring hint (dismissible, persisted in localStorage) ----
@@ -1162,6 +1148,7 @@ export class Editor {
       if (empty) empty.hidden = false;
       if (content) content.hidden = true;
       if (panel) panel.classList.remove('has-selection');
+      this._sketchPanel.closeOverlay();
       return;
     }
     if (empty) empty.hidden = true;
@@ -1251,44 +1238,21 @@ export class Editor {
     container.appendChild(row);
   }
 
+  // Compact + overlay CodeEditors, pin badges, status chip, serial monitor,
+  // templates/API sidebar — all owned by js/ui/sketchpanel.js; this is just
+  // the show/hide + delegate glue for the properties panel's "esp32 only"
+  // section (also closes the overlay if the selection moves away from an
+  // esp32, since there's nothing left for it to edit).
   _renderSketchSection(comp) {
     const section = document.getElementById('sketch-section');
     if (!section) return;
-    if (comp.type !== 'esp32') { section.hidden = true; return; }
+    if (comp.type !== 'esp32') {
+      section.hidden = true;
+      this._sketchPanel.closeOverlay();
+      return;
+    }
     section.hidden = false;
-    const textarea = document.getElementById('sketch-source');
-    if (textarea && document.activeElement !== textarea) {
-      textarea.value = comp.params.sketch || DEFAULT_SKETCH;
-    }
-    const errEl = document.getElementById('sketch-error');
-    if (errEl) { errEl.hidden = true; errEl.textContent = ''; }
-    this._updateSketchStatus(comp);
-  }
-
-  _updateSketchStatus(comp) {
-    const statusEl = document.getElementById('sketch-status');
-    const monitorEl = document.getElementById('sketch-monitor');
-    const errEl = document.getElementById('sketch-error');
-    if (!statusEl) return;
-    const s = comp.state || {};
-    if (!comp.params.sketchEnabled) {
-      statusEl.textContent = 'Stopped';
-      statusEl.className = 'sketch-status';
-    } else {
-      const status = s.sketchStatus || 'Stopped';
-      statusEl.textContent = status;
-      const isError = /error|stopped:/i.test(status) && comp.params.sketchEnabled && s._sketch && s._sketch.status === 'error';
-      statusEl.className = 'sketch-status' + (isError ? ' error' : status === 'Running' ? ' running' : '');
-      if (isError && errEl) { errEl.hidden = false; errEl.textContent = status; }
-    }
-    if (monitorEl) {
-      const log = s.sketchLog || [];
-      const text = log.join('\n');
-      if (monitorEl.textContent !== text) {
-        monitorEl.textContent = text;
-        monitorEl.scrollTop = monitorEl.scrollHeight;
-      }
-    }
+    this._sketchPanel.render(comp);
   }
 
   _buildField(container, comp, bucket, field) {

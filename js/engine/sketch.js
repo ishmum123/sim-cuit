@@ -39,6 +39,36 @@ const OUTPUT = 1;
 
 const VALID_PINS = new Set([2, 4, 5]);
 
+// How many lines the `new Function(...)` wrapper prepends before the user's
+// own source starts, for mapping a thrown error's stack line back to a
+// sketch-source line number (used for the editor's error gutter highlight).
+// Verified empirically (see test/codeeditor.test.mjs "error-line mapping"):
+// V8's synthesized function always renders as
+//   line 1: function anonymous(<params>
+//   line 2: ) {
+//   line 3: "use strict";        <- start of `body` template literal below
+//   line 4+: user source (after instrumentLoops(), which preserves line count)
+// regardless of how many named params are passed, so this is a stable
+// constant, not something that needs recomputing per-instance.
+const PREAMBLE_LINE_COUNT = 3;
+
+// Given an Error thrown from the compiled sketch (or a SyntaxError from the
+// `new Function` compile step itself), try to recover a 1-based line number
+// *within the user's original source*. Returns null when the stack doesn't
+// carry a `<anonymous>:LINE:COL` frame (this reliably happens for
+// `new Function` compile-time SyntaxErrors — V8 gives no such frame — so
+// compile errors are message-only by design, not a bug) or when the
+// recovered line falls outside the source, so callers can gracefully fall
+// back to a message-only error display instead of highlighting a bogus line.
+function extractSourceLine(e, sourceLineCount) {
+  const stack = (e && e.stack) || '';
+  const m = /<anonymous>:(\d+):\d+/.exec(stack);
+  if (!m) return null;
+  const line = parseInt(m[1], 10) - PREAMBLE_LINE_COUNT;
+  if (!Number.isFinite(line) || line < 1 || line > sourceLineCount) return null;
+  return line;
+}
+
 const MAX_LOOP_ITERS = 200000;     // per single setup()/loop() execution attempt
 const MAX_DELAY_REPLAY = 10000;    // per single execution attempt, see module doc
 const MAX_LOG_LINES = 200;
@@ -88,7 +118,15 @@ export class SketchRuntime {
     this.source = source || '';
     this.status = 'stopped'; // 'stopped' | 'running' | 'error'
     this.error = null;
+    this.errorLine = null; // 1-based line in `this.source`, or null (see extractSourceLine)
     this.log = [];
+    // Parallel array of sim-time seconds (this._now at push time) for each
+    // this.log[i] — lets the UI (js/ui/sketchpanel.js) prefix serial monitor
+    // lines with a "[12.34s]" timestamp. Kept as a SEPARATE array (rather
+    // than changing `log` to hold {t, text} objects) so `log` stays exactly
+    // what it always was — a plain array of strings — for existing callers
+    // and test/sketch.test.mjs assertions. Shifted in lockstep with `log`.
+    this.logTimes = [];
     this._maxLog = MAX_LOG_LINES;
 
     this._setupDone = false;
@@ -104,6 +142,8 @@ export class SketchRuntime {
     this._exports = null;
     this._compile();
   }
+
+  _sourceLineCount() { return (this.source.match(/\n/g) || []).length + 1; }
 
   // ------------------------------------------------------------- compiling
 
@@ -134,6 +174,7 @@ export class SketchRuntime {
     } catch (e) {
       this.status = 'error';
       this.error = `Compile error: ${e.message}`;
+      this.errorLine = extractSourceLine(e, this._sourceLineCount());
       this._exports = null;
       return;
     }
@@ -220,7 +261,8 @@ export class SketchRuntime {
     if (this._printIdx < this._printHead) { this._printIdx++; return; }
     const line = args.map((a) => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
     this.log.push(line);
-    if (this.log.length > this._maxLog) this.log.shift();
+    this.logTimes.push(this._now);
+    if (this.log.length > this._maxLog) { this.log.shift(); this.logTimes.shift(); }
     this._printHead++;
     this._printIdx++;
   }
@@ -296,8 +338,12 @@ export class SketchRuntime {
       }
       this.status = 'error';
       this.error = `Runtime error in ${which}(): ${e.message}`;
+      this.errorLine = extractSourceLine(e, this._sourceLineCount());
     }
   }
 }
 
 export const SketchConstants = { HIGH, LOW, INPUT, OUTPUT };
+// Exported purely for unit testing the pure error-line mapping math (see
+// test/codeeditor.test.mjs) — not part of the SketchRuntime public contract.
+export const _internal = { extractSourceLine, PREAMBLE_LINE_COUNT };

@@ -161,10 +161,14 @@
           <div id="rating-fields" class="rating-fields"></div>
 
           <div id="sketch-section" class="sketch-section" hidden>
-            <div class="field-group-title">Program (JS sketch)</div>
-            <textarea id="sketch-source" class="sketch-textarea" rows="12" spellcheck="false"></textarea>
+            <div class="sketch-section-header">
+              <div class="field-group-title" style="margin:0;">Program (JS sketch)</div>
+              <button id="sketch-expand" class="btn btn-small" title="Open the full editor">⤢ Expand</button>
+            </div>
+            <div id="sketch-editor-panel" class="sketch-editor-host"></div>
+            <div id="sketch-pins-panel" class="sketch-pins"></div>
             <div class="sketch-actions">
-              <button id="sketch-upload" class="btn btn-accent btn-small">Upload</button>
+              <button id="sketch-upload" class="btn btn-accent btn-small" title="Upload (⌘/Ctrl+Enter)">Upload</button>
               <button id="sketch-stop" class="btn btn-small">Stop</button>
               <span id="sketch-status" class="sketch-status">Stopped</span>
             </div>
@@ -198,6 +202,46 @@
       <div class="modal-footer">
         <button id="import-cancel" class="btn">Cancel</button>
         <button id="import-submit" class="btn btn-accent">Import</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===================== ESP32 SKETCH OVERLAY EDITOR ===================== -->
+  <div id="sketch-overlay" class="modal-overlay sketch-overlay" hidden>
+    <div class="modal" role="dialog" aria-labelledby="sketch-overlay-title">
+      <div class="modal-header">
+        <span id="sketch-overlay-title">— ESP32 Sketch</span>
+        <button id="sketch-overlay-close" class="modal-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="sketch-overlay-body">
+        <div class="sketch-overlay-main">
+          <div id="sketch-editor-overlay" class="sketch-editor-host" style="flex:1 1 auto; min-height:0;"></div>
+        </div>
+        <div id="sketch-overlay-sidebar" class="sketch-overlay-sidebar">
+          <div>
+            <div class="sketch-sidebar-title">Templates</div>
+            <div id="sketch-template-list" class="sketch-template-list"></div>
+          </div>
+          <div>
+            <div class="sketch-sidebar-title">API Reference</div>
+            <div id="sketch-api-list" class="sketch-api-list"></div>
+          </div>
+        </div>
+      </div>
+      <div class="sketch-overlay-footer">
+        <div class="sketch-overlay-footer-row">
+          <button id="sketch-overlay-sidebar-toggle" class="sketch-sidebar-toggle" title="Toggle sidebar">Sidebar ◂</button>
+          <button id="sketch-overlay-upload" class="btn btn-accent btn-small" title="Upload (⌘/Ctrl+Enter)">Upload</button>
+          <button id="sketch-overlay-stop" class="btn btn-small">Stop</button>
+          <div id="sketch-overlay-pins" class="sketch-pins"></div>
+          <span id="sketch-overlay-status" class="sketch-status">Stopped</span>
+        </div>
+        <div id="sketch-overlay-error" class="sketch-error" hidden></div>
+        <div class="sketch-overlay-monitor-header">
+          <div class="field-group-title">Serial Monitor</div>
+          <button id="sketch-overlay-monitor-clear" class="btn btn-small">Clear</button>
+        </div>
+        <div id="sketch-overlay-monitor" class="sketch-monitor"></div>
       </div>
     </div>
   </div>

@@ -188,7 +188,7 @@ function frame(t) {
     }
   }
   lastT = t;
-  editor.tick();
+  editor.tick(sim.time);
   renderer.draw(t);
   scope.render(sim.time);
   requestAnimationFrame(frame);
@@ -597,7 +597,8 @@ async function boot() {
   const qaFlags = (new URLSearchParams(location.search).get('qa') || '')
     .split(',').map((s) => s.trim());
   const qaActive = qaFlags.includes('run') || qaFlags.includes('blow') || qaFlags.includes('t2000')
-    || qaFlags.includes('scope') || qaFlags.includes('examplesmenu');
+    || qaFlags.includes('scope') || qaFlags.includes('examplesmenu')
+    || qaFlags.includes('sketch') || qaFlags.includes('sketcherror');
 
   if (!loaded && !qaActive) {
     const saved = safeGetAutosave();
@@ -637,7 +638,14 @@ boot();
 // on the trace). "?qa=examplesmenu" opens the Examples dropdown so a
 // screenshot can capture it without simulating a real click; combine with
 // "&pick=<example-id>" (e.g. "&pick=led-killer") to also drive an example
-// load headlessly, for dump-dom verification. Harmless no-op without ?qa=.
+// load headlessly, for dump-dom verification. "?qa=sketch" loads the
+// esp32-blink example, selects the ESP32 (U1) so the properties panel's
+// sketch section is visible, and runs the sim; add "&overlay=1" to also
+// open the ⤢ Expand overlay editor headlessly. "?qa=sketcherror" does the
+// same but replaces U1's sketch with one that throws a runtime error on a
+// known line (5) and fast-forwards a little sim time so the engine has
+// actually hit it — for screenshotting the gutter error-line highlight;
+// also respects "&overlay=1". Harmless no-op without ?qa=.
 // ---------------------------------------------------------------------------
 // Shared fast-forward core for the qa hooks below: steps the sim
 // synchronously (bypassing rAF/wall-clock) by `seconds` of sim time,
@@ -675,7 +683,8 @@ function qaHook() {
   if (!qa) return;
   const flags = qa.split(',').map(s => s.trim());
   const has = (f) => flags.includes(f);
-  if (!(has('run') || has('blow') || has('t2000') || has('scope') || has('examplesmenu'))) return;
+  if (!(has('run') || has('blow') || has('t2000') || has('scope') || has('examplesmenu')
+    || has('sketch') || has('sketcherror'))) return;
 
   if (has('examplesmenu')) {
     examplesMenu.classList.add('open');
@@ -684,6 +693,41 @@ function qaHook() {
       const ex = EXAMPLES.find((e) => e.id === pickId);
       if (ex) loadExample(ex);
     }
+    return;
+  }
+
+  if (has('sketch') || has('sketcherror')) {
+    const wantOverlay = new URLSearchParams(location.search).get('overlay') === '1';
+    const ex = EXAMPLES.find((e) => e.id === 'esp32-blink');
+    loadExample(ex).then(() => {
+      const esp = editor.getCircuit().components.find((c) => c.type === 'esp32');
+      if (!esp) return;
+      if (has('sketcherror')) {
+        // Line 5 (undefinedThing.explode()) throws at runtime — a compile
+        // SyntaxError would report no line at all (see extractSourceLine in
+        // js/engine/sketch.js), which isn't useful for a gutter-highlight
+        // screenshot, so this is a deliberate RUNTIME error on a known line.
+        esp.params.sketch = 'function setup() { pinMode(2, OUTPUT); }\n'
+          + 'function loop() {\n'
+          + '  digitalWrite(2, HIGH); delay(500);\n'
+          + '  digitalWrite(2, LOW);  delay(500);\n'
+          + '  undefinedThing.explode();\n'
+          + '}\n';
+        esp.params.sketchEnabled = true;
+      }
+      editor.select(esp.id);
+      running = true;
+      btnRun.textContent = '⏸ Pause';
+      btnRun.classList.add('active');
+      // A couple hundred ms of sim time is plenty to hit the failing line
+      // (loop() runs immediately after setup(), well before the first
+      // delay() even elapses) so the engine has already computed
+      // state.sketchStatus / state.sketchErrorLine by the time of the
+      // screenshot, instead of racing real rAF timing.
+      qaFastForward(editor.getCircuit().components, 0.2);
+      editor.markDirty();
+      if (wantOverlay) editor.openSketchOverlay();
+    });
     return;
   }
 
