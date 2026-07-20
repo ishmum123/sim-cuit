@@ -34,6 +34,33 @@
       <div class="topbar-group">
         <button id="btn-new" class="btn" title="Start a new blank circuit">New</button>
         <button id="btn-share" class="btn" title="Copy a shareable link to this circuit">Share</button>
+
+        <div class="dropdown" id="examples-dropdown">
+          <button id="btn-examples" class="btn" title="Load an example circuit">Examples ▾</button>
+          <div class="dropdown-menu dropdown-menu-examples" id="examples-menu">
+            <button class="dropdown-item" id="example-led-basics">
+              <span class="dropdown-item-title">LED basics</span>
+              <span class="dropdown-item-desc">a properly protected LED</span>
+            </button>
+            <button class="dropdown-item" id="example-led-killer">
+              <span class="dropdown-item-title">LED killer</span>
+              <span class="dropdown-item-desc">no resistor — watch it die</span>
+            </button>
+            <button class="dropdown-item" id="example-motor-stall">
+              <span class="dropdown-item-title">Motor stall</span>
+              <span class="dropdown-item-desc">6V motor on 1.5V won't spin</span>
+            </button>
+            <button class="dropdown-item" id="example-fuse-protects">
+              <span class="dropdown-item-title">Fuse protects</span>
+              <span class="dropdown-item-desc">the fuse dies so the circuit doesn't</span>
+            </button>
+            <button class="dropdown-item" id="example-esp32-blink">
+              <span class="dropdown-item-title">ESP32 blink</span>
+              <span class="dropdown-item-desc">a JS sketch blinking an LED</span>
+            </button>
+          </div>
+        </div>
+
         <button id="btn-import" class="btn">Import Part…</button>
 
         <div class="dropdown" id="export-dropdown">

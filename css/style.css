@@ -197,6 +197,10 @@ input, textarea { font-family: inherit; font-size: inherit; }
 .dropdown-item:hover { background: var(--surface); }
 .dropdown-sep { height: 1px; background: var(--line); margin: 5px 2px; }
 
+.dropdown-menu-examples { min-width: 250px; }
+.dropdown-item-title { display: block; font-weight: 600; }
+.dropdown-item-desc { display: block; font-size: 11px; color: var(--ink-muted); margin-top: 1px; }
+
 /* ===================== MAIN LAYOUT ===================== */
 
 #main-layout {

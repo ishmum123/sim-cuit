@@ -117,11 +117,28 @@ editor.onChange(() => {
 });
 
 // Run `editor.loadCircuit(circuit)` without triggering an autosave write for
-// that programmatic load itself.
+// that programmatic load itself. Also records a snapshot of what was just
+// loaded (see normalizeCircuit/lastLoadedSnapshot below) so later "is the
+// canvas still what we loaded" checks — e.g. the Examples menu's replace
+// confirm — have something to compare against besides just the starter demo.
 function loadCircuitQuietly(circuit) {
   suppressAutosave = true;
   try { editor.loadCircuit(circuit); } finally { suppressAutosave = false; }
+  lastLoadedSnapshot = normalizeCircuit(circuit);
 }
+
+// Structural (not live-sim-state) snapshot of a circuit, used both to detect
+// "still the starter demo" (New button) and "still whatever was last loaded"
+// (Examples menu) before silently discarding the user's canvas.
+function normalizeCircuit(c) {
+  return JSON.stringify({
+    components: (c.components || []).map((x) => ({
+      id: x.id, type: x.type, x: x.x, y: x.y, rot: x.rot || 0, params: x.params, ratings: x.ratings,
+    })),
+    wires: (c.wires || []).map((w) => ({ id: w.id, points: w.points })),
+  });
+}
+let lastLoadedSnapshot = null;
 
 function rebuildNetlist() {
   const { components, wires } = editor.getCircuit();
@@ -376,7 +393,10 @@ $('btn-export').addEventListener('click', (e) => {
   e.stopPropagation();
   exportMenu.classList.toggle('open');
 });
-document.addEventListener('click', () => exportMenu.classList.remove('open'));
+document.addEventListener('click', () => {
+  exportMenu.classList.remove('open');
+  examplesMenu.classList.remove('open');
+});
 
 function exportPrep() {
   const { components, wires } = editor.getCircuit();
@@ -416,6 +436,62 @@ $('load-json-file').addEventListener('change', async (e) => {
   }
   e.target.value = '';
 });
+
+// ---------------------------------------------------------------------------
+// Examples menu — pre-built demo circuits under examples/*.json, fetched
+// with a relative URL (this app is deployed at a GitHub Pages subpath, so
+// no leading slash). Loading one goes through the same loadCircuitQuietly
+// path as a shared link: it does NOT clear autosave immediately (unlike
+// New), so a reload before the user touches anything still restores their
+// previous session — only their next real edit overwrites the autosave.
+// ---------------------------------------------------------------------------
+
+const EXAMPLES = [
+  { id: 'led-basics', file: 'examples/led-basics.json', title: 'LED basics', blurb: 'a properly protected LED' },
+  { id: 'led-killer', file: 'examples/led-killer.json', title: 'LED killer', blurb: 'no resistor — watch it die' },
+  { id: 'motor-stall', file: 'examples/motor-stall.json', title: 'Motor stall', blurb: "6V motor on 1.5V won't spin" },
+  { id: 'fuse-protects', file: 'examples/fuse-protects.json', title: 'Fuse protects', blurb: "the fuse dies so the circuit doesn't" },
+  { id: 'esp32-blink', file: 'examples/esp32-blink.json', title: 'ESP32 blink', blurb: 'a JS sketch blinking an LED' },
+];
+
+const examplesMenu = $('examples-menu');
+$('btn-examples').addEventListener('click', (e) => {
+  e.stopPropagation();
+  examplesMenu.classList.toggle('open');
+});
+
+async function loadExample(ex) {
+  examplesMenu.classList.remove('open');
+  const current = editor.getCircuit();
+  if (!circuitMatchesStarter(current) && !circuitUnchangedSinceLoad(current)) {
+    const ok = confirm(`Load "${ex.title}"? Your current circuit will be discarded.`);
+    if (!ok) return;
+  }
+
+  let circuit;
+  try {
+    const res = await fetch(ex.file);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    circuit = loadJson(await res.text());
+  } catch (e) {
+    editor.showToast(`Couldn't load "${ex.title}": ${e.message}`, 'error');
+    return;
+  }
+
+  running = false;
+  btnRun.textContent = '▶ Run';
+  btnRun.classList.remove('active');
+  sim.setNetlist([]);
+  loadCircuitQuietly(circuit);
+  centerCameraOnCircuit();
+  netlistDirty = true;
+  editor.showToast(`Loaded "${ex.title}" — press ▶ Run to simulate.`, 'ok');
+}
+
+for (const ex of EXAMPLES) {
+  const btn = $(`example-${ex.id}`);
+  if (btn) btn.addEventListener('click', () => loadExample(ex));
+}
 
 // ---------------------------------------------------------------------------
 // Camera framing — center the loaded circuit's content in the viewport.
@@ -479,13 +555,14 @@ function starterCircuit() {
 // carry once the sim has run, so an untouched starter circuit still compares
 // equal even mid-run.
 function circuitMatchesStarter(circuit) {
-  const normalize = (c) => JSON.stringify({
-    components: (c.components || []).map((x) => ({
-      id: x.id, type: x.type, x: x.x, y: x.y, rot: x.rot || 0, params: x.params, ratings: x.ratings,
-    })),
-    wires: (c.wires || []).map((w) => ({ id: w.id, points: w.points })),
-  });
-  return normalize(circuit) === normalize(starterCircuit());
+  return normalizeCircuit(circuit) === normalizeCircuit(starterCircuit());
+}
+
+// True if `circuit` is unchanged since the last programmatic load (New,
+// share link, autosave restore, Load JSON, or an Examples menu pick) — i.e.
+// there's nothing of the user's to lose by silently replacing it.
+function circuitUnchangedSinceLoad(circuit) {
+  return lastLoadedSnapshot !== null && normalizeCircuit(circuit) === lastLoadedSnapshot;
 }
 
 // ---------------------------------------------------------------------------
@@ -519,7 +596,8 @@ async function boot() {
 
   const qaFlags = (new URLSearchParams(location.search).get('qa') || '')
     .split(',').map((s) => s.trim());
-  const qaActive = qaFlags.includes('run') || qaFlags.includes('blow') || qaFlags.includes('t2000') || qaFlags.includes('scope');
+  const qaActive = qaFlags.includes('run') || qaFlags.includes('blow') || qaFlags.includes('t2000')
+    || qaFlags.includes('scope') || qaFlags.includes('examplesmenu');
 
   if (!loaded && !qaActive) {
     const saved = safeGetAutosave();
@@ -556,7 +634,10 @@ boot();
 // instead of racing real wall-clock timing), "?qa=scope" (probe the LED's
 // current and the battery's current on the oscilloscope, then run — can be
 // combined with t2000, e.g. "?qa=scope,t2000", to see the LED's death spike
-// on the trace). Harmless no-op without ?qa=.
+// on the trace). "?qa=examplesmenu" opens the Examples dropdown so a
+// screenshot can capture it without simulating a real click; combine with
+// "&pick=<example-id>" (e.g. "&pick=led-killer") to also drive an example
+// load headlessly, for dump-dom verification. Harmless no-op without ?qa=.
 // ---------------------------------------------------------------------------
 // Shared fast-forward core for the qa hooks below: steps the sim
 // synchronously (bypassing rAF/wall-clock) by `seconds` of sim time,
@@ -594,7 +675,17 @@ function qaHook() {
   if (!qa) return;
   const flags = qa.split(',').map(s => s.trim());
   const has = (f) => flags.includes(f);
-  if (!(has('run') || has('blow') || has('t2000') || has('scope'))) return;
+  if (!(has('run') || has('blow') || has('t2000') || has('scope') || has('examplesmenu'))) return;
+
+  if (has('examplesmenu')) {
+    examplesMenu.classList.add('open');
+    const pickId = new URLSearchParams(location.search).get('pick');
+    if (pickId) {
+      const ex = EXAMPLES.find((e) => e.id === pickId);
+      if (ex) loadExample(ex);
+    }
+    return;
+  }
 
   const { components } = editor.getCircuit();
   const sw = components.find(c => c.id === 'S1');
