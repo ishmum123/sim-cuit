@@ -380,6 +380,10 @@ input, textarea { font-family: inherit; font-size: inherit; }
 .prop-id { font-family: var(--mono); color: var(--accent); font-weight: 600; font-size: 13px; }
 .prop-label { color: var(--text-muted); font-size: 12px; }
 
+.failure-banner[hidden] {
+  display: none;
+}
+
 .failure-banner {
   background: rgba(255, 92, 92, 0.1);
   border: 1px solid #5a2a2a;
