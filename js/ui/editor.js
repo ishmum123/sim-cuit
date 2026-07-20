@@ -57,7 +57,14 @@
  *   editor.camera            { x, y, scale }   // world->screen: sx = wx*scale + x
  *   editor.selection          Set<string>       // selected component ids
  *   editor.hover              { compId, terminalIndex } | null
- *   editor.wiring             { points:[{x,y}], previewPoint:{x,y}, valid } | null
+ *   editor.wiring             { points:[{x,y}], previewPoint:{x,y},
+ *                                previewSegments:[{x,y}],
+ *                                snapTerminal:{compId,terminalIndex}|null,
+ *                                fromComp, fromTerminal, valid } | null
+ *                                // valid === true iff previewPoint is
+ *                                // currently snapped onto a legal (non-start)
+ *                                // destination terminal — render.js colors
+ *                                // the rubber-band preview green in that case.
  *   editor.placingType        string | null
  *   editor.placingPreviewPos  {x,y} | null
  *   editor.marquee            {x0,y0,x1,y1} | null
@@ -80,6 +87,7 @@ function terminalWorldPoints(comp) {
 
 const GRID = 20;
 const TERMINAL_HIT_R = 9;      // screen px (pre-scale) tolerance for terminal picking
+const WIRE_HINT_KEY = 'simcuit-wire-hint';
 const BODY_SIZE = {
   battery: { w: 90, h: 50 }, resistor: { w: 90, h: 36 }, led: { w: 70, h: 60 },
   diode: { w: 80, h: 36 }, capacitor: { w: 70, h: 50 }, motor: { w: 74, h: 74 },
@@ -154,11 +162,14 @@ export class Editor {
     this._drag = null;   // { ids, offsets:Map, moved }
     this._pan = null;    // { startScreen, startCamera }
     this._toastedFailures = new WeakSet();
+    this._wireHintDismissed = this._readWireHintDismissed();
+    this._wireHintEl = null;
 
     this._bindDom();
     this._bindCanvas();
     this._buildPalette();
     this._setupResize();
+    this._bindWireHint();
   }
 
   // ---------------------------------------------------------------- public
@@ -195,6 +206,7 @@ export class Editor {
     this.selection.clear();
     this._syncCounters();
     this._renderProperties();
+    this._updateWireHintVisibility();
     this._notify();
   }
 
@@ -287,6 +299,31 @@ export class Editor {
     });
   }
 
+  // ---- first-run wiring hint (dismissible, persisted in localStorage) ----
+
+  _readWireHintDismissed() {
+    try { return localStorage.getItem(WIRE_HINT_KEY) === 'dismissed'; } catch { return false; }
+  }
+
+  _writeWireHintDismissed() {
+    try { localStorage.setItem(WIRE_HINT_KEY, 'dismissed'); } catch { /* private mode etc: ignore */ }
+  }
+
+  _bindWireHint() {
+    this._wireHintEl = document.getElementById('wire-hint');
+    document.getElementById('wire-hint-dismiss')?.addEventListener('click', () => {
+      this._wireHintDismissed = true;
+      this._writeWireHintDismissed();
+      this._updateWireHintVisibility();
+    });
+    this._updateWireHintVisibility();
+  }
+
+  _updateWireHintVisibility() {
+    if (!this._wireHintEl) return;
+    this._wireHintEl.hidden = this._wireHintDismissed || this.wires.length > 0;
+  }
+
   _buildPalette() {
     for (const type of Object.keys(this.registry)) {
       this._addPaletteItem(type, GROUP_MAP[type] || 'imported');
@@ -338,7 +375,7 @@ export class Editor {
     c.addEventListener('contextmenu', e => e.preventDefault());
     window.addEventListener('keydown', e => this._onKeyDown(e));
     window.addEventListener('keyup', e => this._onKeyUp(e));
-    c.addEventListener('mouseleave', () => { this.hover = null; this._notify(); });
+    c.addEventListener('mouseleave', () => { this.hover = null; if (!this.wiring) this.canvas.style.cursor = 'default'; this._notify(); });
   }
 
   _eventPos(e) {
@@ -407,7 +444,12 @@ export class Editor {
       e.preventDefault();
       return;
     }
-    if (e.button === 2) return;
+    if (e.button === 2) {
+      // right-click while wiring cancels it (contextmenu is globally
+      // suppressed below, so this is the only place we need to react)
+      if (this.wiring) { this._cancelWiring(); this._notify(); }
+      return;
+    }
 
     // placing a new component
     if (this.placingType) {
@@ -429,15 +471,17 @@ export class Editor {
     const termHit = this._hitTerminal(world);
     if (this.wiring) {
       if (termHit) {
-        const last = this.wiring.points[this.wiring.points.length - 1];
-        const bend = this._orthoBend(last, termHit.point);
-        this.wiring.points.push(...bend, termHit.point);
-        this.wires.push({ id: this._nextWireId(), points: this.wiring.points });
-        this.wiring = null;
-        this._notify();
+        if (this._isWireStart(termHit)) {
+          // clicked back on the origin terminal: never create a zero-length
+          // wire — just ignore the click, wiring stays active
+          return;
+        }
+        this._completeWire(termHit);
         return;
       }
-      // add a bend point and continue routing
+      // click on empty space: drop an optional manual bend point and keep
+      // routing (most users will just click the destination terminal
+      // directly and never hit this branch)
       const last = this.wiring.points[this.wiring.points.length - 1];
       const sp = { x: snap(world.x), y: snap(world.y) };
       const bend = this._orthoBend(last, sp);
@@ -446,7 +490,10 @@ export class Editor {
       return;
     }
     if (termHit) {
-      this.wiring = { points: [termHit.point], fromComp: termHit.comp.id, fromTerminal: termHit.terminalIndex, previewPoint: termHit.point, valid: true };
+      this.wiring = {
+        points: [termHit.point], fromComp: termHit.comp.id, fromTerminal: termHit.terminalIndex,
+        previewPoint: termHit.point, previewSegments: [], snapTerminal: null, valid: false,
+      };
       this._notify();
       return;
     }
@@ -489,16 +536,22 @@ export class Editor {
 
     if (this.placingType) {
       this.placingPreviewPos = { x: snap(world.x), y: snap(world.y) };
+      this.canvas.style.cursor = 'crosshair';
       this._notify();
       return;
     }
 
     if (this.wiring) {
       const last = this.wiring.points[this.wiring.points.length - 1];
-      const sp = { x: snap(world.x), y: snap(world.y) };
+      const termHit = this._hitTerminal(world);
+      const snapHit = (termHit && !this._isWireStart(termHit)) ? termHit : null;
+      const sp = snapHit ? snapHit.point : { x: snap(world.x), y: snap(world.y) };
       const bend = this._orthoBend(last, sp);
       this.wiring.previewSegments = [...bend, sp];
       this.wiring.previewPoint = sp;
+      this.wiring.snapTerminal = snapHit ? { compId: snapHit.comp.id, terminalIndex: snapHit.terminalIndex } : null;
+      this.wiring.valid = !!snapHit;
+      this.canvas.style.cursor = 'crosshair';
       this._notify();
       return;
     }
@@ -508,6 +561,7 @@ export class Editor {
       const dyMoved = Math.abs(pos.y - this._drag.downPos.y);
       if (dxMoved > 3 || dyMoved > 3) this._drag.moved = true;
       if (this._drag.moved) {
+        this.canvas.style.cursor = 'move';
         for (const id of this._drag.ids) {
           const c = this.components.find(cc => cc.id === id);
           const off = this._drag.offsets.get(id);
@@ -530,15 +584,30 @@ export class Editor {
     const termHit = this._hitTerminal(world);
     if (termHit) {
       this.hover = { compId: termHit.comp.id, terminalIndex: termHit.terminalIndex };
+      this.canvas.style.cursor = 'crosshair';
     } else {
       const comp = this._hitComponent(world);
       this.hover = comp ? { compId: comp.id, terminalIndex: -1 } : null;
+      this.canvas.style.cursor = comp ? 'move' : 'default';
     }
     this._notify();
   }
 
   _onMouseUp(e) {
     if (this._pan) { this._pan = null; return; }
+
+    if (this.wiring) {
+      // drag-to-wire: mousedown on a terminal, drag, release on another
+      // terminal completes the wire. Releasing on the start terminal (i.e.
+      // a plain click with no drag) or on empty space just leaves wiring
+      // active in click-mode — it never cancels, so drag degrades
+      // gracefully into the click/click flow.
+      const pos = this._eventPos(e);
+      const world = this.screenToWorld(pos.x, pos.y);
+      const termHit = this._hitTerminal(world);
+      if (termHit && !this._isWireStart(termHit)) this._completeWire(termHit);
+      return;
+    }
 
     if (this._drag) {
       if (!this._drag.moved && this._drag.toggled && this._drag.toggled.type === 'switch') {
@@ -635,7 +704,26 @@ export class Editor {
     if (e.code === 'Space') this.spacePan = false;
   }
 
-  _cancelWiring() { this.wiring = null; }
+  _cancelWiring() { this.wiring = null; this.canvas.style.cursor = 'default'; }
+
+  _isWireStart(termHit) {
+    return !!this.wiring && termHit.comp.id === this.wiring.fromComp && termHit.terminalIndex === this.wiring.fromTerminal;
+  }
+
+  _completeWire(termHit) {
+    const last = this.wiring.points[this.wiring.points.length - 1];
+    const bend = this._orthoBend(last, termHit.point);
+    this.wiring.points.push(...bend, termHit.point);
+    const isFirstWire = this.wires.length === 0;
+    this.wires.push({ id: this._nextWireId(), points: this.wiring.points });
+    this.wiring = null;
+    if (isFirstWire) {
+      this._wireHintDismissed = true;
+      this._writeWireHintDismissed();
+      this._updateWireHintVisibility();
+    }
+    this._notify();
+  }
 
   // ------------------------------------------------------------ properties
 

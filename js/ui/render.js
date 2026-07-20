@@ -140,6 +140,8 @@ export class Renderer {
       this._drawComponent(ctx, comp, editor, t);
     }
 
+    this._drawJunctions(ctx, wires, components);
+
     this._drawWirePreview(ctx, editor);
     this._drawPlacingPreview(ctx, editor);
     this._drawMarquee(ctx, editor);
@@ -312,6 +314,39 @@ export class Renderer {
     return null;
   }
 
+  // ------------------------------------------------------------ junctions
+
+  // Draw a filled dot anywhere two or more things meet at the same point:
+  // a terminal sitting mid-wire, two wires joined end-to-end, or a wire
+  // ending on a terminal. Makes electrical connectivity visible at a glance.
+  _drawJunctions(ctx, wires, components) {
+    const tally = new Map();
+    const bump = (p) => {
+      const key = `${Math.round(p.x)},${Math.round(p.y)}`;
+      tally.set(key, (tally.get(key) || 0) + 1);
+    };
+    for (const w of wires) {
+      if (!w.points) continue;
+      for (const p of w.points) bump(p);
+    }
+    for (const comp of components) {
+      let pts;
+      try { pts = terminalWorldPoints(comp); } catch { pts = null; }
+      if (!pts) continue;
+      for (const p of pts) bump(p);
+    }
+    ctx.save();
+    ctx.fillStyle = COL.stroke;
+    for (const [key, count] of tally) {
+      if (count < 2) continue;
+      const [x, y] = key.split(',').map(Number);
+      ctx.beginPath();
+      ctx.arc(x, y, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
   // -------------------------------------------------------- wiring preview
 
   _drawWirePreview(ctx, editor) {
@@ -319,17 +354,28 @@ export class Renderer {
     if (!w) return;
     const pts = [...w.points, ...(w.previewSegments || [])];
     if (pts.length < 2) return;
+    const snapped = !!w.snapTerminal;
+    const dotColor = snapped ? COL.ok : COL.accent;
     ctx.save();
     ctx.setLineDash([6, 5]);
-    ctx.strokeStyle = 'rgba(77,163,255,0.8)';
+    ctx.strokeStyle = snapped ? 'rgba(77,214,138,0.9)' : 'rgba(77,163,255,0.8)';
     ctx.lineWidth = 2;
     this._strokePoly(ctx, pts);
     ctx.setLineDash([]);
     for (const p of pts) {
       ctx.beginPath();
-      ctx.fillStyle = COL.accent;
+      ctx.fillStyle = dotColor;
       ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
       ctx.fill();
+    }
+    if (snapped) {
+      // strong halo on the destination terminal we're snapped to
+      const last = pts[pts.length - 1];
+      ctx.beginPath();
+      ctx.strokeStyle = COL.ok;
+      ctx.lineWidth = 2;
+      ctx.arc(last.x, last.y, 9, 0, Math.PI * 2);
+      ctx.stroke();
     }
     ctx.restore();
   }
@@ -409,17 +455,57 @@ export class Renderer {
 
     if (s.failed) this._drawCharredOverlay(ctx, w, h, t);
 
-    // terminal dots + hover highlight on specific terminal
+    // terminals: hollow circle affordance normally; while wiring, candidate
+    // destinations get a soft highlight and the snapped-to terminal gets a
+    // strong one; hovering (not wiring) enlarges/fills the single terminal
+    // under the cursor.
     let pts;
     try { pts = terminalWorldPoints(comp); } catch { pts = null; }
     if (pts) {
+      const wiring = editor.wiring;
       for (let i = 0; i < pts.length; i++) {
         const local = this._toLocal(comp, pts[i]);
         const isHoverTerm = hovered && editor.hover.terminalIndex === i;
-        ctx.beginPath();
-        ctx.fillStyle = isHoverTerm ? COL.accent : '#3a4356';
-        ctx.arc(local.x, local.y, isHoverTerm ? 4.5 : 3, 0, Math.PI * 2);
-        ctx.fill();
+        const isWireStart = !!wiring && wiring.fromComp === comp.id && wiring.fromTerminal === i;
+        const isSnapTarget = !!wiring && !!wiring.snapTerminal &&
+          wiring.snapTerminal.compId === comp.id && wiring.snapTerminal.terminalIndex === i;
+        const isCandidate = !!wiring && !isWireStart && !isSnapTarget;
+
+        if (isSnapTarget) {
+          ctx.beginPath();
+          ctx.fillStyle = COL.ok;
+          ctx.arc(local.x, local.y, 5.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.beginPath();
+          ctx.strokeStyle = COL.ok;
+          ctx.lineWidth = 1.6;
+          ctx.arc(local.x, local.y, 9, 0, Math.PI * 2);
+          ctx.stroke();
+        } else if (isWireStart) {
+          ctx.beginPath();
+          ctx.fillStyle = COL.accent;
+          ctx.arc(local.x, local.y, 5, 0, Math.PI * 2);
+          ctx.fill();
+        } else if (isCandidate) {
+          ctx.beginPath();
+          ctx.fillStyle = 'rgba(77,163,255,0.20)';
+          ctx.arc(local.x, local.y, 5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.lineWidth = 1.3;
+          ctx.strokeStyle = 'rgba(77,163,255,0.7)';
+          ctx.stroke();
+        } else if (isHoverTerm) {
+          ctx.beginPath();
+          ctx.fillStyle = COL.accent;
+          ctx.arc(local.x, local.y, 4.5, 0, Math.PI * 2);
+          ctx.fill();
+        } else {
+          ctx.beginPath();
+          ctx.lineWidth = 1.3;
+          ctx.strokeStyle = '#5b6478';
+          ctx.arc(local.x, local.y, 3.2, 0, Math.PI * 2);
+          ctx.stroke();
+        }
       }
     }
 

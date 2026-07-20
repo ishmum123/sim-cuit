@@ -251,8 +251,41 @@ input, textarea { font-family: inherit; font-size: inherit; }
   display: block;
   width: 100%;
   height: 100%;
-  cursor: crosshair;
+  cursor: default;
 }
+
+.wire-hint {
+  position: absolute;
+  left: 50%;
+  top: 14px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(27, 33, 43, 0.9);
+  border: 1px solid var(--accent-dim);
+  border-radius: 20px;
+  padding: 6px 8px 6px 14px;
+  font-size: 11.5px;
+  color: var(--text);
+  backdrop-filter: blur(4px);
+  white-space: nowrap;
+  z-index: 30;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.35);
+}
+
+.wire-hint-dismiss {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.wire-hint-dismiss:hover { color: var(--text); background: rgba(255,255,255,0.08); }
 
 .canvas-hint {
   position: absolute;
