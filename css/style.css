@@ -488,6 +488,65 @@ input, textarea { font-family: inherit; font-size: inherit; }
 .field-checkbox-row { display: flex; align-items: center; gap: 8px; flex-direction: row; }
 .field-checkbox-row .field-label { order: 2; }
 
+/* ===================== ESP32 SKETCH PROGRAM PANEL ===================== */
+
+.sketch-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-soft);
+}
+.sketch-textarea {
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 10px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.45;
+  resize: vertical;
+  tab-size: 2;
+}
+.sketch-textarea:focus { outline: none; border-color: var(--accent); }
+.sketch-actions { display: flex; align-items: center; gap: 8px; }
+.sketch-status {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sketch-status.running { color: #4dd68a; }
+.sketch-status.error { color: var(--danger); }
+.sketch-error {
+  background: rgba(255, 92, 92, 0.1);
+  border: 1px solid #5a2a2a;
+  color: #ff9d9d;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-family: var(--mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.sketch-monitor {
+  background: #0d1015;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  color: #8fe3a8;
+  padding: 8px 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  height: 110px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* ===================== MODAL ===================== */
 
 .modal-overlay {

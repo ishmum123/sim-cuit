@@ -19,7 +19,11 @@
         "x": 260,
         "y": 200,
         "rot": 0,
-        "params": { "gpio2Mode": "blink", "gpio4Mode": "low", "gpio5Mode": "input" },
+        "params": {
+          "gpio2Mode": "low", "gpio4Mode": "low", "gpio5Mode": "input",
+          "sketchEnabled": true,
+          "sketch": "function setup() { pinMode(2, OUTPUT); }\nfunction loop() {\n  digitalWrite(2, HIGH); delay(500);\n  digitalWrite(2, LOW);  delay(500);\n}\n"
+        },
         "ratings": { "gpioMaxCurrent": 0.04, "gpioAbsMaxV": 3.6, "gpioAbsMinV": -0.3, "vinMax": 12 },
         "state": { "v": 0, "i": 0, "p": 0, "temp": 0, "failed": null, "failureMsg": null, "justFailed": false, "brownout": false, "status": null }
       },

@@ -87,6 +87,14 @@
  */
 
 import { createComponent, terminalOffsets, repair } from '../engine/components.js';
+import { SketchRuntime } from '../engine/sketch.js';
+
+const DEFAULT_SKETCH = `function setup() { pinMode(4, OUTPUT); }
+function loop() {
+  digitalWrite(4, HIGH); delay(500);
+  digitalWrite(4, LOW);  delay(500);
+}
+`;
 
 // terminalOffsets(comp) returns ROTATED but component-RELATIVE {dx,dy} pairs
 // (per js/engine/components.js: rotOffset() rotates the local offset but
@@ -267,7 +275,10 @@ export class Editor {
 
   tick() {
     const sel = this.getSelected();
-    if (sel) this._updateReadings(sel);
+    if (sel) {
+      this._updateReadings(sel);
+      if (sel.type === 'esp32') this._updateSketchStatus(sel);
+    }
     for (const c of this.components) {
       if (c.state && c.state.justFailed && !this._toastedFailures.has(c.state)) {
         this._toastedFailures.add(c.state);
@@ -386,6 +397,40 @@ export class Editor {
       this.showToast(`${c.id} repaired`, 'ok');
       this._renderProperties();
       this._notify();
+    });
+
+    document.getElementById('sketch-upload')?.addEventListener('click', () => {
+      const c = this.getSelected();
+      if (!c || c.type !== 'esp32') return;
+      const textarea = document.getElementById('sketch-source');
+      const source = textarea ? textarea.value : '';
+      this._pushUndo();
+      c.params.sketch = source;
+      c.params.sketchEnabled = true;
+      // dry-compile here purely for immediate UI feedback (toast + inline
+      // red message) — the engine constructs its own SketchRuntime from
+      // c.params.sketch on the next sim step regardless.
+      const probe = new SketchRuntime(source);
+      const errEl = document.getElementById('sketch-error');
+      if (probe.status === 'error') {
+        if (errEl) { errEl.hidden = false; errEl.textContent = probe.error; }
+        this.showToast(`Sketch compile error: ${probe.error}`, 'error');
+      } else {
+        if (errEl) { errEl.hidden = true; errEl.textContent = ''; }
+        this.showToast(`${c.id}: sketch uploaded, running.`, 'ok');
+      }
+      this._notify();
+      this._renderProperties();
+    });
+
+    document.getElementById('sketch-stop')?.addEventListener('click', () => {
+      const c = this.getSelected();
+      if (!c || c.type !== 'esp32') return;
+      this._pushUndo();
+      c.params.sketchEnabled = false;
+      this.showToast(`${c.id}: sketch stopped.`, 'info');
+      this._notify();
+      this._renderProperties();
     });
   }
 
@@ -989,7 +1034,48 @@ export class Editor {
       for (const field of ratingSchema) this._buildField(ratingFields, comp, 'ratings', field);
     }
 
+    this._renderSketchSection(comp);
     this._updateReadings(comp);
+  }
+
+  _renderSketchSection(comp) {
+    const section = document.getElementById('sketch-section');
+    if (!section) return;
+    if (comp.type !== 'esp32') { section.hidden = true; return; }
+    section.hidden = false;
+    const textarea = document.getElementById('sketch-source');
+    if (textarea && document.activeElement !== textarea) {
+      textarea.value = comp.params.sketch || DEFAULT_SKETCH;
+    }
+    const errEl = document.getElementById('sketch-error');
+    if (errEl) { errEl.hidden = true; errEl.textContent = ''; }
+    this._updateSketchStatus(comp);
+  }
+
+  _updateSketchStatus(comp) {
+    const statusEl = document.getElementById('sketch-status');
+    const monitorEl = document.getElementById('sketch-monitor');
+    const errEl = document.getElementById('sketch-error');
+    if (!statusEl) return;
+    const s = comp.state || {};
+    if (!comp.params.sketchEnabled) {
+      statusEl.textContent = 'Stopped';
+      statusEl.className = 'sketch-status';
+    } else {
+      const status = s.sketchStatus || 'Stopped';
+      statusEl.textContent = status;
+      const isError = /error|stopped:/i.test(status) && comp.params.sketchEnabled && s._sketch && s._sketch.status === 'error';
+      statusEl.className = 'sketch-status' + (isError ? ' error' : status === 'Running' ? ' running' : '');
+      if (isError && errEl) { errEl.hidden = false; errEl.textContent = status; }
+    }
+    if (monitorEl) {
+      const log = s.sketchLog || [];
+      const text = log.join('\n');
+      if (monitorEl.textContent !== text) {
+        monitorEl.textContent = text;
+        monitorEl.scrollTop = monitorEl.scrollHeight;
+      }
+    }
   }
 
   _buildField(container, comp, bucket, field) {

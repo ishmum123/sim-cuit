@@ -12,6 +12,8 @@
 // small numeric helpers
 // ---------------------------------------------------------------------------
 
+import { SketchRuntime } from './sketch.js';
+
 const GMIN_LEAK = 1e-12;
 const FAIL_OPEN_G = 1e-12;
 const FAIL_SHORT_G = 1e3;
@@ -168,6 +170,11 @@ export function repair(comp) {
   s.status = null;
   s.gpio = null;
   s.pinCurrent = null;
+  s._sketch = null;
+  s._sketchPoweredPrev = false;
+  s.sketchPins = null;
+  s.sketchStatus = null;
+  s.sketchLog = null;
   if (comp.type === 'switch') {
     // leave user-set closed state alone
   }
@@ -1083,7 +1090,10 @@ export const ComponentRegistry = {
   // any GPIO or overvoltage on VIN kills the whole board (failed='open').
   esp32: {
     label: 'ESP32 Dev Board', prefix: 'U', terminals: 6,
-    defaultParams: { gpio2Mode: 'low', gpio4Mode: 'low', gpio5Mode: 'input' },
+    defaultParams: {
+      gpio2Mode: 'low', gpio4Mode: 'low', gpio5Mode: 'input',
+      sketch: '', sketchEnabled: false,
+    },
     defaultRatings: { gpioMaxCurrent: 0.04, gpioAbsMaxV: 3.6, gpioAbsMinV: -0.3, vinMax: 12 },
     paramSchema: [
       { key: 'gpio2Mode', label: 'GPIO2 Mode', type: 'select', options: ['high', 'low', 'blink', 'input'] },
@@ -1096,12 +1106,30 @@ export const ComponentRegistry = {
       if (mode === 'blink') return (((t || 0) % 1) < 0.5) ? 3.3 : 0;
       return null; // input mode: not driven
     },
+    // Effective mode for a pin, folding in a running sketch's pinMode() calls.
+    // Pins the sketch hasn't touched (never pinMode'd) fall back to the
+    // manual per-pin param, exactly like when no sketch is running at all.
+    _effectiveMode(comp, name) {
+      const s = comp.state;
+      if (comp.params.sketchEnabled && s.sketchPins && s.sketchPins[Number(name.replace('GPIO', ''))]) {
+        const p = s.sketchPins[Number(name.replace('GPIO', ''))];
+        return p.mode === 'input' ? 'input' : 'sketch';
+      }
+      const modes = { GPIO2: comp.params.gpio2Mode, GPIO4: comp.params.gpio4Mode, GPIO5: comp.params.gpio5Mode };
+      return modes[name];
+    },
+    _target(comp, name, mode, t) {
+      if (mode === 'sketch') {
+        const p = comp.state.sketchPins[Number(name.replace('GPIO', ''))];
+        return p.value ? 3.3 : 0;
+      }
+      return this._gpioOut(mode, t);
+    },
     stamp(comp, ctx) {
       const [vin, gnd, v3v3, g2, g4, g5] = comp.nodes;
       const s = comp.state;
       if (s.failed) return; // dead board: everything floats (global gmin only)
       const pins = { GPIO2: g2, GPIO4: g4, GPIO5: g5 };
-      const modes = { GPIO2: comp.params.gpio2Mode, GPIO4: comp.params.gpio4Mode, GPIO5: comp.params.gpio5Mode };
       const vVin = ctx.vNode(vin) - ctx.vNode(gnd);
       const vV3 = ctx.vNode(v3v3) - ctx.vNode(gnd);
       const vinOk = vVin >= 4.5 && vVin <= 12;
@@ -1114,9 +1142,9 @@ export const ComponentRegistry = {
       for (const name of Object.keys(pins)) {
         const pin = pins[name];
         if (s.pinFailed && s.pinFailed[name]) { stampResistor(ctx, pin, gnd, 1 / FAIL_OPEN_G); continue; }
-        const mode = modes[name];
+        const mode = this._effectiveMode(comp, name);
         if (!powered || mode === 'input') { stampResistor(ctx, pin, gnd, 10e6); continue; }
-        const target = this._gpioOut(mode, ctx.time);
+        const target = this._target(comp, name, mode, ctx.time);
         stampCompanion(ctx, pin, gnd, 1 / 40, -(1 / 40) * target);
       }
     },
@@ -1136,7 +1164,6 @@ export const ComponentRegistry = {
         return;
       }
       const pins = { GPIO2: g2, GPIO4: g4, GPIO5: g5 };
-      const modes = { GPIO2: comp.params.gpio2Mode, GPIO4: comp.params.gpio4Mode, GPIO5: comp.params.gpio5Mode };
       const vinOk = vVin >= 4.5 && vVin <= 12;
       const v3Ok = vV3 >= 3.0 && vV3 <= 3.6;
       const powered = vinOk || v3Ok;
@@ -1149,21 +1176,21 @@ export const ComponentRegistry = {
         const vPin = ctx.vNode(pin) - ctx.vNode(gnd);
         s.gpio[name] = vPin;
         if (s.pinFailed[name]) { s.pinCurrent[name] = 0; continue; }
-        const mode = modes[name];
+        const mode = this._effectiveMode(comp, name);
         let iPin;
         if (!powered || mode === 'input') iPin = vPin / 10e6;
         else {
-          const target = this._gpioOut(mode, ctx.time);
+          const target = this._target(comp, name, mode, ctx.time);
           iPin = (target - vPin) / 40;
         }
         s.pinCurrent[name] = iPin;
       }
       s.status = s.brownout ? 'Brownout (unpowered)' : `Powered — 3V3=${vV3.toFixed(2)}V`;
     },
-    postStep(comp) {
+    postStep(comp, dt, ctx) {
       const s = comp.state;
       clearJustFailed(s);
-      if (s.failed) return;
+      if (s.failed) { this._tickSketch(comp, (ctx ? ctx.time : 0) + (dt || 0)); return; }
       if (!s.pinFailed) s.pinFailed = { GPIO2: false, GPIO4: false, GPIO5: false };
       const gpio = s.gpio || {};
       const pinCurrent = s.pinCurrent || {};
@@ -1173,6 +1200,7 @@ export const ComponentRegistry = {
         if (vPin === undefined) continue;
         if (vPin > comp.ratings.gpioAbsMaxV || vPin < comp.ratings.gpioAbsMinV) {
           markFailed(s, 'open', `ESP32 killed: ${vPin.toFixed(1)} V on ${name} exceeds ${comp.ratings.gpioAbsMaxV} V abs max`);
+          this._tickSketch(comp, (ctx ? ctx.time : 0) + (dt || 0));
           return;
         }
         const iPin = pinCurrent[name];
@@ -1185,6 +1213,47 @@ export const ComponentRegistry = {
       if (s.vin !== undefined && s.vin > comp.ratings.vinMax) {
         markFailed(s, 'open', `ESP32 regulator dead: VIN ${s.vin.toFixed(1)}V exceeded ${comp.ratings.vinMax}V max`);
       }
+      const now = (ctx ? ctx.time : 0) + (dt || 0);
+      this._tickSketch(comp, now);
+    },
+    // Runs the sketch (if enabled) for the current step, using the pin
+    // voltages computeState() just wrote into s.gpio for digitalRead()/
+    // analogRead(). Overrides s.sketchPins (consulted by _effectiveMode/
+    // _target above on the NEXT step's stamp()) with the sketch's pinMode()/
+    // digitalWrite() output. Losing power (brownout) or the board failing
+    // resets the runtime — setup() runs again once power returns, like a
+    // real reboot.
+    _tickSketch(comp, now) {
+      const s = comp.state;
+      if (!comp.params.sketchEnabled || !comp.params.sketch) {
+        s._sketch = null;
+        s._sketchPoweredPrev = false;
+        s.sketchPins = null;
+        s.sketchStatus = null;
+        s.sketchLog = null;
+        return;
+      }
+      if (!s._sketch || s._sketch.source !== comp.params.sketch) {
+        s._sketch = new SketchRuntime(comp.params.sketch);
+        s._sketchPoweredPrev = false;
+      }
+      const rt = s._sketch;
+      const poweredNow = !s.failed && !s.brownout;
+      if (!poweredNow) {
+        if (s._sketchPoweredPrev) rt.reset();
+        s._sketchPoweredPrev = false;
+        s.sketchPins = null;
+        s.sketchStatus = rt.status === 'error' ? rt.error : 'Stopped (unpowered)';
+        s.sketchLog = rt.log;
+        return;
+      }
+      if (!s._sketchPoweredPrev) rt.reset(); // just powered on: fresh boot
+      s._sketchPoweredPrev = true;
+      rt.setPinReader((pinNum) => (s.gpio ? (s.gpio[`GPIO${pinNum}`] || 0) : 0));
+      rt.tick(now);
+      s.sketchPins = rt.getPinState();
+      s.sketchStatus = rt.status === 'error' ? rt.error : (rt.status === 'running' ? 'Running' : 'Stopped');
+      s.sketchLog = rt.log;
     },
     spice(comp) { return `* ${comp.id} ESP32 dev board — behavioral GPIO model only, not a native SPICE primitive`; },
     kicad: { lib: 'MCU_Espressif', symbol: 'ESP32-DEVKITC-32E', footprint: 'Module:ESP32-DEVKITC' },

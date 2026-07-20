@@ -238,11 +238,15 @@ export class Simulation {
   }
 
   _finalize(dt) {
+    const ctx = this._readCtx(dt);
     for (const c of this.comps) {
       const model = ComponentRegistry[c.type];
       if (!model) continue;
-      if (model.computeState) model.computeState(c, this._readCtx(dt));
-      if (model.postStep) model.postStep(c, dt);
+      if (model.computeState) model.computeState(c, ctx);
+      // ctx is passed as an optional 3rd arg — existing postStep(comp, dt)
+      // implementations simply ignore it; components that need sim time
+      // (e.g. esp32's sketch runtime) can read ctx.time.
+      if (model.postStep) model.postStep(c, dt, ctx);
     }
   }
 

@@ -140,7 +140,9 @@ check('esp32-blink: circuit loads with an ESP32 board', () => {
   const ex = loadExample('esp32-blink.json');
   const esp = ex.components.find(c => c.type === 'esp32');
   assert.ok(esp, 'esp32-blink should contain an esp32 component');
-  assert.strictEqual(esp.params.gpio2Mode, 'blink', 'GPIO2 should be in blink mode');
+  assert.strictEqual(esp.params.sketchEnabled, true, 'sketch should be enabled');
+  assert.ok(/pinMode\(2, OUTPUT\)/.test(esp.params.sketch), 'sketch should pinMode GPIO2 as OUTPUT');
+  assert.ok(/digitalWrite\(2, HIGH\)/.test(esp.params.sketch), 'sketch should drive GPIO2 high');
   const led = ex.components.find(c => c.type === 'led');
   assert.ok(led, 'esp32-blink should contain an LED');
   const resistor = ex.components.find(c => c.type === 'resistor');

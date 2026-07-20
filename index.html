@@ -128,6 +128,19 @@
 
           <div id="param-fields" class="param-fields"></div>
           <div id="rating-fields" class="rating-fields"></div>
+
+          <div id="sketch-section" class="sketch-section" hidden>
+            <div class="field-group-title">Program (JS sketch)</div>
+            <textarea id="sketch-source" class="sketch-textarea" rows="12" spellcheck="false"></textarea>
+            <div class="sketch-actions">
+              <button id="sketch-upload" class="btn btn-accent btn-small">Upload</button>
+              <button id="sketch-stop" class="btn btn-small">Stop</button>
+              <span id="sketch-status" class="sketch-status">Stopped</span>
+            </div>
+            <div id="sketch-error" class="sketch-error" hidden></div>
+            <div class="field-group-title">Serial Monitor</div>
+            <div id="sketch-monitor" class="sketch-monitor"></div>
+          </div>
         </div>
       </aside>
 
