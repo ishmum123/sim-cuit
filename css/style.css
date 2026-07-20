@@ -215,7 +215,7 @@ input, textarea { font-family: inherit; font-size: inherit; }
  * separates groups instead of boxes/dividers). */
 
 #palette {
-  width: 152px;
+  width: 180px;
   flex: 0 0 auto;
   background: var(--bg);
   border-right: 1px solid var(--line);
@@ -267,8 +267,8 @@ input, textarea { font-family: inherit; font-size: inherit; }
 .palette-item.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-dark); }
 
 .palette-item-icon {
-  width: 22px;
-  height: 17px;
+  width: 26px;
+  height: 20px;
   flex: 0 0 auto;
   display: flex;
   align-items: center;
@@ -278,7 +278,7 @@ input, textarea { font-family: inherit; font-size: inherit; }
 .palette-item.active .palette-item-icon { color: var(--accent-dark); }
 .palette-item-icon svg { width: 100%; height: 100%; overflow: visible; }
 
-.palette-item-name { font-size: 11.5px; }
+.palette-item-name { font-size: 12.5px; }
 
 /* ---------- Canvas ---------- */
 
